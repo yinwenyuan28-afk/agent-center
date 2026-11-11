@@ -19,3 +19,15 @@ Thumbs.db
 
 # 日志
 *.log
+
+# 本地环境
+.env
+.env.*
+*.local
+
+# 明文密钥。母版在 ~/.agents，这里防止拷进仓库后被提交
+providers.toml
+providers.toml.bak
+mcp.toml
+codex-env.ps1
+claude-bridge.json
