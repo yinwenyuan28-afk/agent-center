@@ -1,0 +1,139 @@
+@import 'tailwindcss';
+
+/*
+ * 配色向 ChatGPT 靠：中性灰阶、低饱和、状态色克制。
+ *
+ * 用 CSS 变量而不是 Tailwind 的 color palette，原因是暗色模式那套值
+ * 需要在两套主题间整体切换，用变量最直接，也便于以后接主题切换器。
+ */
+@theme {
+  --color-bg: #ffffff;
+  --color-bg-subtle: #f9f9f9;
+  --color-bg-muted: #f4f4f4;
+  --color-bg-hover: #f0f0f0;
+
+  --color-border: #e5e5e5;
+  --color-border-strong: #d4d4d4;
+
+  --color-text: #0d0d0d;
+  --color-text-muted: #6e6e6e;
+  --color-text-faint: #999999;
+
+  --color-ok: #12805c;
+  --color-ok-bg: #e8f6f0;
+  --color-warn: #a16207;
+  --color-warn-bg: #fef7e6;
+  --color-danger: #c5341c;
+  --color-danger-bg: #fdedea;
+  --color-info: #2563a8;
+  --color-info-bg: #eaf2fb;
+  --color-accent: #10a37f;
+  --color-accent-hover: #0d8c6d;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+
+  --font-sans: 'Söhne', ui-sans-serif, system-ui, -apple-system, 'Segoe UI',
+    'Microsoft YaHei', sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'SF Mono', Consolas, monospace;
+}
+
+/* 暗色主题。跟随系统偏好，不需要代码里判断。 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #212121;
+    --color-bg-subtle: #1a1a1a;
+    --color-bg-muted: #2f2f2f;
+    --color-bg-hover: #2a2a2a;
+
+    --color-border: #3c3c3c;
+    --color-border-strong: #525252;
+
+    --color-text: #ececec;
+    --color-text-muted: #a0a0a0;
+    --color-text-faint: #6e6e6e;
+
+    --color-ok: #4ade9b;
+    --color-ok-bg: #143328;
+    --color-warn: #e5b567;
+    --color-warn-bg: #33290f;
+    --color-danger: #f0937f;
+    --color-danger-bg: #3a1d17;
+    --color-info: #85b8ea;
+    --color-info-bg: #16283d;
+    --color-accent: #10a37f;
+    --color-accent-hover: #34c99f;
+  }
+}
+
+/* 基础重置 */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--color-text);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+/* 让原生控件也跟随主题 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+  }
+}
+
+/* 滚动条向 ChatGPT 靠：细、低对比 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-faint);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 键盘焦点可见。只在键盘导航时出现，不影响鼠标点击。 */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* 尊重系统的减少动效设置 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

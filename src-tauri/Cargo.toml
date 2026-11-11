@@ -1,0 +1,70 @@
+[package]
+name = "agentcenter"
+version = "0.1.0"
+description = "统一管理多个 AI coding agent 的全局配置"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+# Tauri 2 要求有一个 lib 目标，移动端和桌面端共用同一套 IPC 逻辑
+name = "agentcenter_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri 运行时与窗口
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+# 配置序列化：TOML 写配置，JSON 读写 lock 文件与 manifest
+serde = { version = "1", features = ["derive"] }
+# preserve_order 必须开：改写用户的配置时要保持原有键顺序，
+# 否则每次同步都会产生大量无关的 diff
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "0.8"
+
+# 保留注释的 TOML 编辑。toml 只适合只读，
+# 改用户的 config.toml 必须用 toml_edit，否则注释和空行全丢
+toml_edit = "0.25"
+
+# 错误处理：库层用 thiserror 定义具体错误，CLI 层用 anyhow 附加上下文
+thiserror = "2"
+anyhow = "1"
+
+# 文件系统：walkdir 遍历 skill 目录，dirs 解析家目录
+walkdir = "2"
+dirs = "5"
+
+# 内容指纹：比对母版与副本、检测漂移
+sha2 = "0.10"
+
+# Windows 专用：
+# - AttachConsole 让 release 版 exe 在终端里被调用时能把输出送回父进程控制台
+# - GetFileInformationByHandle 用于判定两个路径是否互为硬链接
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_Storage_FileSystem",
+] }
+
+# 命令行解析
+clap = { version = "4", features = ["derive"] }
+
+# 时间戳：备份目录名、lock 时间比较
+chrono = { version = "0.4", features = ["serde"] }
+
+[features]
+# Tauri 2 的默认特性组合
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+# 体积优化。GUI 工具不需要极致运行时性能，优先减小产物
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

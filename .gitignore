@@ -1,0 +1,21 @@
+# 依赖
+node_modules/
+
+# 前端构建产物
+dist/
+
+# Rust 构建产物
+src-tauri/target/
+
+# Tauri 生成的图标缓存
+src-tauri/gen/
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log

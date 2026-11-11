@@ -1,0 +1,389 @@
+/**
+ * 前后端共享的数据契约。
+ *
+ * 这里的每个类型都对应 Rust 侧 serde 的序列化结构。
+ * 改这里的时候必须同步改 `src-tauri/src/types.rs`，否则界面会拿到 undefined。
+ */
+
+/** 链接的实际落地方式。auto 只出现在配置里，实际结果一定是后四种之一。 */
+export type LinkKind = 'symlink' | 'junction' | 'hardlink' | 'copy';
+
+/** 单条映射的健康状态。 */
+export type HealthState = 'ok' | 'drifted' | 'broken' | 'missing';
+
+/** 一个 agent 的指令文件映射及其当前状态。 */
+export interface Mapping {
+  /** agent 标识，如 claude / zcode / cursor */
+  agent: string;
+  /** 展示用名称，如 "Claude Code" */
+  label: string;
+  /** 母版路径，如 ~/.agents/AGENTS.md */
+  source: string;
+  /** 目标路径，如 ~/.claude/CLAUDE.md */
+  target: string;
+  /** 配置里要求的方式 */
+  mode: 'auto' | LinkKind;
+  /** 实测落地的方式；目标不存在时为空 */
+  actual: LinkKind | null;
+  /** 健康状态 */
+  health: HealthState;
+  /** 该 agent 的配置目录是否存在。false 表示工具未安装，同步时会跳过 */
+  installed: boolean;
+  /** 补充说明，如 "内容与母版不同" / "链接目标不存在" */
+  note: string | null;
+}
+
+/** 一个已收集的 skill。 */
+export interface Skill {
+  /** 目录名，也是唯一标识 */
+  name: string;
+  /** SKILL.md 里 frontmatter 的 description，没写则为空串 */
+  description: string;
+  /** 标签列表 */
+  tags: string[];
+  /** 是否由 npx skills 管理（在 .skill-lock.json 里有记录） */
+  managed: boolean;
+  /** 受管时的来源仓库，如 "MiniMax-AI/skills" */
+  source: string | null;
+  /** 内容指纹，取前 8 位展示 */
+  hash: string;
+  /** 目录内文件数 */
+  fileCount: number;
+  /** 目录字节数 */
+  sizeBytes: number;
+}
+
+/** 散落在别的 agent 目录里、尚未收进 ~/.agents 的 skill。 */
+export interface OrphanSkill {
+  name: string;
+  /** 出现在哪个 agent 目录，如 ".cursor/skills" */
+  location: string;
+  /** 完整路径 */
+  path: string;
+  /** 与中心库同名 skill 的比对结果 */
+  relation: 'unique' | 'identical' | 'conflict' | 'broken-link';
+}
+
+/** 一次 collect 操作的完整计划，dry-run 时就是这个结构。 */
+export interface CollectPlan {
+  /** 会移入中心库的 */
+  toImport: OrphanSkill[];
+  /** 内容相同、只删副本的 */
+  toDedupe: OrphanSkill[];
+  /** 内容冲突、需要人工决定的 */
+  conflicts: OrphanSkill[];
+  /** 坏链接，只报告 */
+  broken: OrphanSkill[];
+}
+
+/** git 状态快照。 */
+export interface GitStatus {
+  /** 是否为 git 仓库 */
+  isRepo: boolean;
+  branch: string;
+  /** 相对上游领先的提交数 */
+  ahead: number;
+  /** 落后上游的提交数 */
+  behind: number;
+  /** 有未提交改动的路径 */
+  changed: GitChange[];
+  /** 远端地址，没有则为空串 */
+  remote: string;
+}
+
+export interface GitChange {
+  path: string;
+  /** M 修改 / A 新增 / D 删除 / ?? 未跟踪 */
+  status: string;
+}
+
+/** npx skills 的受管 skill 快照。 */
+export interface ManagedSkill {
+  name: string;
+  source: string;
+  sourceType: string;
+  /** 分支/标签/SHA，没有则为空 */
+  ref: string | null;
+  /** 内容指纹前 8 位 */
+  hashShort: string;
+  installedAt: string;
+  updatedAt: string;
+  /** 是否检测到可用更新；null 表示未检查 */
+  hasUpdate: boolean | null;
+}
+
+/** 命令执行结果，用于把 CLI 的原始输出透传给界面日志区。 */
+export interface RunResult {
+  ok: boolean;
+  exitCode: number;
+  /** 合并后的 stdout + stderr，保留原始顺序不可得时先 stdout 后 stderr */
+  output: string;
+}
+
+// ---- API key 体检 ----
+//
+// 注意：这组类型里没有任何密钥字段。密钥原文从不跨进程边界传输。
+
+/** 一条凭证的体检信息。 */
+export interface CredentialEntry {
+  /** 哪个 agent 在用 */
+  agent: string;
+  /** 归一化后的服务商标识 */
+  provider: string;
+  /** api_key 或 oauth */
+  kind: string;
+  /** 具体落在哪个文件、哪个字段 */
+  location: string;
+  /** 密钥指纹前 8 位 */
+  fingerprint: string;
+  /** 密钥字符数 */
+  length: number;
+  /** 密钥末尾 4 位，帮助人辨认 */
+  tail: string;
+  /** 同一个指纹还出现在哪些别的 agent 上 */
+  sharedWith: string[];
+  /** 是否在多个 agent 上重复 */
+  duplicated: boolean;
+}
+
+/** 读不到明文、需要用户自己登录的 agent。 */
+export interface UnsupportedAgent {
+  agent: string;
+  reason: string;
+}
+
+/** 一次完整体检的结果。 */
+export interface CredentialOverview {
+  /** 按 provider 分组后的全部凭证 */
+  providers: CredentialEntry[][];
+  /** 读不到明文的 agent */
+  unsupported: UnsupportedAgent[];
+  /** 凭证总条数 */
+  totalEntries: number;
+  /** 不同的 key 数量 */
+  uniqueKeys: number;
+  /** 重复的 key 组数 */
+  duplicatedKeys: number;
+  /** 配了多把不同 key 的 provider 数量 */
+  providersWithMultipleKeys: number;
+}
+
+// ---- provider 统一管理 ----
+
+/** 模型价格（每百万 token）。目前只有 Pi 的配置里有。 */
+export interface ModelCost {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+}
+
+/**
+ * 一个模型的能力描述。
+ *
+ * 除 id 外全部可选。留空表示「不指定，沿用 agent 配置里的现有值或内置默认」。
+ * 这样只写了 id 的存量母版升级后行为不变。
+ */
+export interface ModelSpec {
+  id: string;
+  /** 展示名。留空时用 id */
+  name?: string;
+  /** 上下文窗口 */
+  contextWindow?: number;
+  /** 单次最大输出 token */
+  maxOutputTokens?: number;
+  /** 能接受的输入类型：text / image / video / pdf */
+  inputModalities: string[];
+  /** 能产出的输出类型 */
+  outputModalities: string[];
+  /** 是否支持推理 */
+  reasoning?: boolean;
+  /** 可选推理档位：low / medium / high / max … */
+  reasoningEfforts: string[];
+  /** 默认推理档位 */
+  defaultEffort?: string;
+  /** 是否支持函数调用 */
+  toolCall?: boolean;
+  cost?: ModelCost;
+}
+
+/** 母版里的一条 provider。不含密钥原文，只有长度和末尾。 */
+export interface ProviderView {
+  id: string;
+  name: string;
+  baseUrl: string;
+  /** 默认协议标识：anthropic / openai-chat / openai-responses / google-generative-ai */
+  kind: string;
+  /** 协议展示名，如 "OpenAI Responses" */
+  kindLabel: string;
+  /**
+   * 按 agent 覆盖的协议。key 是 agent id，value 是协议标识。
+   *
+   * 协议不是 provider 的属性而是 provider × agent 的：同一个端点
+   * 在 ZCode 里可能是 anthropic、在 Pi 里是 openai-responses。
+   * 这里只列和默认值不同的那些。
+   */
+  agentKinds: Record<string, string>;
+  /** 模型列表，带能力元数据 */
+  models: ModelSpec[];
+  agents: string[];
+  note: string;
+  /** key 长度，0 表示没配 */
+  keyLen: number;
+  /** key 末尾 4 位 */
+  keyTail: string;
+}
+
+/** 一条差异。 */
+export interface ProviderDiffLine {
+  agent: string;
+  path: string;
+  action: 'add' | 'update' | 'remove' | 'unchanged' | 'conflict';
+  target: string;
+  detail: string;
+}
+
+/** provider 差异报告。 */
+export interface ProviderDiffReport {
+  lines: ProviderDiffLine[];
+  conflicts: string[];
+  agentCount: number;
+  changedFiles: number;
+}
+
+/** provider 同步结果。 */
+export interface ProviderSyncReport {
+  ok: boolean;
+  written: string[];
+  skipped: string[];
+  backups: string[];
+  log: string[];
+}
+
+/** provider 分配矩阵：provider 池 × agent，和 MCP 那份同形。 */
+export interface ProviderMatrix {
+  columns: AgentColumn[];
+  providers: ProviderView[];
+  /** 池子是空的 */
+  empty: boolean;
+}
+
+/** 一条模型回填记录。 */
+export interface BackfillLine {
+  provider: string;
+  model: string;
+  /** 从哪个 agent 读到的 */
+  source: string;
+  /** 填了哪些字段，如 "context_window=1000000" */
+  filled: string[];
+}
+
+/** 协议不一致：母版里的协议和某个 agent 配置里实际写的不一样。 */
+export interface KindMismatch {
+  provider: string;
+  agent: string;
+  /** 母版要求的协议 */
+  master: string;
+  /** agent 配置里实际的协议 */
+  actual: string;
+}
+
+/** 模型元数据回填报告。 */
+export interface BackfillReport {
+  /** 一共补了多少个字段 */
+  filledFields: number;
+  lines: BackfillLine[];
+  /** 母版里没有对应端点的 provider（不导入，只报告） */
+  skippedProviders: string[];
+  /** 协议不一致的条目。只报告，不自动改 */
+  kindMismatches: KindMismatch[];
+  /** 是否真的写了母版 */
+  wrote: boolean;
+}
+
+// ---- MCP 统一管理 ----
+
+/** 母版里的一条 MCP server。env/headers 只返回值名，不返回值。 */
+export interface McpServerView {
+  id: string;
+  name: string;
+  /** stdio / sse / http */
+  transport: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  url: string;
+  /** 环境变量名列表 */
+  envKeys: string[];
+  /** 请求头名列表 */
+  headerKeys: string[];
+  enabled: boolean;
+  agents: string[];
+  note: string;
+}
+
+/** MCP 差异行。 */
+export interface McpDiffLineView {
+  agent: string;
+  path: string;
+  /** add / update / unchanged */
+  action: string;
+  target: string;
+  detail: string;
+}
+
+/** MCP 差异报告。 */
+export interface McpDiffReportView {
+  lines: McpDiffLineView[];
+  agentCount: number;
+  changedFiles: number;
+}
+
+/** MCP 同步结果。 */
+export interface McpSyncReportView {
+  ok: boolean;
+  written: string[];
+  skipped: string[];
+  backups: string[];
+  log: string[];
+}
+
+/** 矩阵的列：一个 agent。 */
+export interface AgentColumn {
+  agent: string;
+  label: string;
+  /** 配置文件是否存在 */
+  available: boolean;
+  /** 读不到的原因 */
+  note: string;
+  /** 单槽位：同一时刻只能有一个条目在它上面生效。界面点选时要自动摘掉其他的 */
+  singleSlot: boolean;
+  /**
+   * 这个 agent 支持哪些协议。空数组 = 全部四种。
+   *
+   * 界面给某个 agent 选协议时只列这些 —— Codex 只有 responses、
+   * Claude 只有 anthropic，列别的等于骗人。
+   */
+  supportedKinds: string[];
+}
+
+/** 矩阵的行：一个 MCP server。 */
+export interface MatrixRow {
+  id: string;
+  name: string;
+  transport: string;
+  /** 命令或 URL */
+  target: string;
+  enabled: boolean;
+  /** 已分配给哪些 agent */
+  assigned: string[];
+  note: string;
+}
+
+/** 完整的分配矩阵。 */
+export interface McpMatrix {
+  columns: AgentColumn[];
+  rows: MatrixRow[];
+  /** 池子是空的 */
+  empty: boolean;
+}

@@ -1,0 +1,35 @@
+{
+  "name": "agentcenter",
+  "version": "0.1.0",
+  "description": "统一管理多个 AI coding agent 的全局配置：指令文件映射、skill 收集分类、第三方 skill 更新、git 版本管理",
+  "bin": {
+    "agentcenter": "bin/agentcenter.js"
+  },
+  "files": [
+    "bin/",
+    "binaries/"
+  ],
+  "os": [
+    "win32",
+    "darwin",
+    "linux"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "agents.md",
+    "claude-code",
+    "cursor",
+    "codex",
+    "skill",
+    "config"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yinwenyuan28-afk/agentcenter.git"
+  }
+}
