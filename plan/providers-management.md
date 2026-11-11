@@ -22,6 +22,8 @@
 
 ## 各 agent 的 provider 结构（实测，字段级）
 
+文件和键的现行记录在 [provider-config-keys.md](provider-config-keys.md)。下面这张表是 2026-11-10 的实测快照，后来 ZCode 又多了 `provider_config.json`，以那份记录为准。
+
 | agent | 配置文件 | 多 provider 并存 | key 落在哪 | 当前选中靠什么 |
 |---|---|---|---|---|
 | **ZCode** | `~/.zcode/v2/config.json` | 支持，`provider` map 平铺 | `provider.<uuid>.options.apiKey` 明文 | 任务级，`tasks-index.sqlite` 的 `tasks.model` |

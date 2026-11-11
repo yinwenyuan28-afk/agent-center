@@ -57,10 +57,11 @@ impl Agent for Claude {
         home_dir().join(".claude").join("settings.json").exists()
     }
 
-    /// Claude 只有 ANTHROPIC_* 一套环境变量，只认 Anthropic Messages。
+    /// Claude Code 本身只说 Anthropic Messages。
+    /// OpenAI Chat / Responses 由本地转换听口翻过去，所以这三种都能分给它。
     fn supported_kinds(&self) -> &'static [crate::providers::model::ProviderKind] {
-        use crate::providers::model::ProviderKind::Anthropic;
-        &[Anthropic]
+        use crate::providers::model::ProviderKind::{Anthropic, OpenaiChat, OpenaiResponses};
+        &[Anthropic, OpenaiChat, OpenaiResponses]
     }
 
     fn single_slot(&self) -> bool {

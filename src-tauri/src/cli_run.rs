@@ -603,6 +603,7 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                         .map(|m| model::ModelSpec::new(m.clone()))
                         .collect(),
                     agents,
+                    claude_model_map: model::ClaudeModelMap::default(),
                     note: String::new(),
                 });
             }
@@ -689,7 +690,7 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
         }
 
         ProvidersCmd::Assign { id, agents } => {
-            match matrix::set_row(&id, &agents) {
+            match matrix::set_row(&id, &agents, None) {
                 Ok(()) => {
                     println!(
                         "已设置 {id} 的分配：{}",

@@ -299,28 +299,20 @@ pub struct ModelSpec {
     )]
     pub max_output_tokens: Option<u64>,
     /// 能接受的输入类型：text / image / video / pdf
-    #[serde(
-        default,
-        alias = "input_modalities",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    ///
+    /// 空数组也要序列化出去。前端把这几个字段当成必有数组，
+    /// 若用 skip_serializing_if 省略，JSON 里就没有这个键，
+    /// Providers 页一读 `.length` 就会在渲染时炸掉，看起来像卡在骨架屏。
+    #[serde(default, alias = "input_modalities")]
     pub input_modalities: Vec<String>,
     /// 能产出的输出类型，通常只有 text
-    #[serde(
-        default,
-        alias = "output_modalities",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(default, alias = "output_modalities")]
     pub output_modalities: Vec<String>,
     /// 是否支持推理/思考
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<bool>,
     /// 可选的推理档位，如 low / medium / high / max
-    #[serde(
-        default,
-        alias = "reasoning_efforts",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(default, alias = "reasoning_efforts")]
     pub reasoning_efforts: Vec<String>,
     /// 默认推理档位
     #[serde(
@@ -361,6 +353,39 @@ pub struct ModelCost {
         skip_serializing_if = "Option::is_none"
     )]
     pub cache_write: Option<f64>,
+}
+
+/// Claude Code 的档位映射：Opus / Sonnet / Haiku / 默认模型各自对应哪条模型 id。
+///
+/// 写入 `~/.claude/settings.json` 的
+/// `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` 与 `ANTHROPIC_MODEL`。
+/// 全空表示未配置，注入器回退到按 `models` 下标推断。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaudeModelMap {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opus: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sonnet: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub haiku: Option<String>,
+    /// 对应 `ANTHROPIC_MODEL`。母版 TOML / JSON 都写成 `default`。
+    #[serde(
+        default,
+        rename = "default",
+        alias = "default_model",
+        alias = "defaultModel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default_model: Option<String>,
+}
+
+impl ClaudeModelMap {
+    pub fn is_empty(&self) -> bool {
+        self.opus.is_none()
+            && self.sonnet.is_none()
+            && self.haiku.is_none()
+            && self.default_model.is_none()
+    }
 }
 
 /// 一条模型回填记录。
@@ -423,6 +448,8 @@ pub struct ProviderView {
     /// 模型列表，带能力元数据。只填了 id 的模型元数据字段都是空
     pub models: Vec<ModelSpec>,
     pub agents: Vec<String>,
+    /// Claude Code 档位映射。未配置时为空对象
+    pub claude_model_map: ClaudeModelMap,
     pub note: String,
     /// key 长度，用于界面提示"已配置"
     pub key_len: usize,

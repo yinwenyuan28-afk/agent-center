@@ -238,7 +238,13 @@ pub fn inspect_credentials() -> Result<crate::types::CredentialOverview, String>
 
 /// 列出母版里的 provider。不返回密钥原文，只给长度和末尾。
 #[tauri::command]
-pub fn list_providers() -> Result<Vec<crate::types::ProviderView>, String> {
+pub async fn list_providers() -> Result<Vec<crate::types::ProviderView>, String> {
+    tauri::async_runtime::spawn_blocking(list_providers_inner)
+        .await
+        .map_err(|e| format!("list_providers 任务失败：{e}"))?
+}
+
+fn list_providers_inner() -> Result<Vec<crate::types::ProviderView>, String> {
     let list = crate::providers::store::load_or_default().map_err(|e| e.to_string())?;
     Ok(list
         .into_iter()
@@ -265,6 +271,7 @@ pub fn list_providers() -> Result<Vec<crate::types::ProviderView>, String> {
                     .collect(),
                 models: p.models,
                 agents: p.agents,
+                claude_model_map: p.claude_model_map,
                 note: p.note,
                 key_len: p.api_key.len(),
                 key_tail: if p.api_key.len() >= 4 { tail } else { String::new() },
@@ -322,6 +329,7 @@ pub fn save_provider(
             }
             existing.models = models;
             existing.agents = agents;
+            // 编辑表单不改 Claude 映射；映射由分配弹窗单独写
             existing.note = note;
         }
         None => {
@@ -337,6 +345,7 @@ pub fn save_provider(
                 api_key,
                 models,
                 agents,
+                claude_model_map: crate::types::ClaudeModelMap::default(),
                 note,
             });
         }
@@ -405,9 +414,16 @@ pub fn backfill_models(dry_run: bool) -> Result<crate::types::BackfillReport, St
 ///
 /// 和 `list_providers` 返回同一份数据，多带 agent 列信息（是否安装）。
 /// 界面默认只列 provider，点「分配」才展开卡片，靠这份数据。
+///
+/// 异步 + spawn_blocking：同步命令若在 GUI 线程上卡住，前端骨架屏会
+/// 一直不消，连 8s 超时都救不了（WebView 定时器也可能跟着僵住）。
 #[tauri::command]
-pub fn provider_matrix() -> Result<crate::types::ProviderMatrix, String> {
-    crate::providers::matrix::build().map_err(|e| e.to_string())
+pub async fn provider_matrix() -> Result<crate::types::ProviderMatrix, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        crate::providers::matrix::build().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("provider_matrix 任务失败：{e}"))?
 }
 
 /// 整行替换某个 provider 的分配列表。
@@ -415,8 +431,12 @@ pub fn provider_matrix() -> Result<crate::types::ProviderMatrix, String> {
 /// 一次写整行而不是逐格写，避免中间状态。
 /// Claude 是单槽位，勾上它会自动从其他 provider 上摘掉。
 #[tauri::command]
-pub fn set_provider_row(id: String, agents: Vec<String>) -> Result<RunResult, String> {
-    match crate::providers::matrix::set_row(&id, &agents) {
+pub fn set_provider_row(
+    id: String,
+    agents: Vec<String>,
+    claude_model_map: Option<crate::types::ClaudeModelMap>,
+) -> Result<RunResult, String> {
+    match crate::providers::matrix::set_row(&id, &agents, claude_model_map) {
         Ok(()) => Ok(RunResult::success(format!(
             "已更新 {id} 的分配：{}",
             if agents.is_empty() {

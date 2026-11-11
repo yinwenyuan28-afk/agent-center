@@ -441,18 +441,24 @@ pub fn scan_opencode() -> AgentScan {
                 id: id.clone(),
                 name: name.to_string(),
                 base_url: base.to_string(),
-                // opencode 用 package 表达协议：anthropic 包 vs openai-compatible 包
-                api_kind: p.get("package").and_then(|v| v.as_str()).map(|pkg| {
-                    if pkg.contains("anthropic") {
-                        ProviderKind::Anthropic
-                    } else {
-                        ProviderKind::OpenaiChat
-                    }
-                }),
+                // V2 用 package，V1 用 npm；含 anthropic 即 Anthropic，否则按 chat 兼容层
+                api_kind: p
+                    .get("package")
+                    .or_else(|| p.get("npm"))
+                    .and_then(|v| v.as_str())
+                    .map(|pkg| {
+                        if pkg.contains("anthropic") {
+                            ProviderKind::Anthropic
+                        } else if pkg.contains("openai") && !pkg.contains("compatible") {
+                            ProviderKind::OpenaiResponses
+                        } else {
+                            ProviderKind::OpenaiChat
+                        }
+                    }),
                 key_fp: if key.len() >= 16 { fp(key) } else { String::new() },
                 key_len: key.len(),
                 models,
-                location: format!("opencode.json · providers.{id}"),
+                location: format!("opencode.json · provider.{id}"),
             });
         }
     }

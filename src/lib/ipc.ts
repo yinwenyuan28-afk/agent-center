@@ -10,6 +10,7 @@
  */
 import type {
   BackfillReport,
+  ClaudeModelMap,
   CollectPlan,
   CredentialOverview,
   GitStatus,
@@ -172,8 +173,11 @@ export const diffProviders = () => call<ProviderDiffReport>('diff_providers');
 export const providerMatrix = () => call<ProviderMatrix>('provider_matrix');
 
 /** 整行替换某个 provider 的分配列表。Claude 是单槽位，会做互斥。 */
-export const setProviderRow = (id: string, agents: string[]) =>
-  call<RunResult>('set_provider_row', { id, agents });
+export const setProviderRow = (
+  id: string,
+  agents: string[],
+  claudeModelMap?: ClaudeModelMap | null,
+) => call<RunResult>('set_provider_row', { id, agents, claudeModelMap: claudeModelMap ?? null });
 
 /** 切换某个 provider 在某个 agent 的启用状态。 */
 export const setProviderAssignment = (providerId: string, agent: string, on: boolean) =>

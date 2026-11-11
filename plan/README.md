@@ -8,6 +8,7 @@
 |---|---|---|
 | 本文件 | 指令映射、skill 管理、git 集成、API key 只读体检 | 已实施 |
 | [providers-management.md](providers-management.md) | provider 统一管理与注入（母版、七个注入器、五道安全闸） | 已实施 |
+| [provider-config-keys.md](provider-config-keys.md) | 各工具改哪个文件、哪些键；CC Switch 已核对，我们的实现标待确认 | 记录 |
 | [provider-models-and-agent-interface.md](provider-models-and-agent-interface.md) | 模型元数据管理 + Agent 接口化重构 | 已实施 |
 
 ## 要解决的问题

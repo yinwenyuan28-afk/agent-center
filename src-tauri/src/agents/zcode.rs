@@ -74,7 +74,11 @@ impl Agent for ZCode {
     }
 
     fn provider_targets(&self) -> Vec<PathBuf> {
-        vec![home_dir().join(".zcode").join("v2").join("config.json")]
+        let v2 = home_dir().join(".zcode").join("v2");
+        vec![
+            v2.join("config.json"),
+            v2.join("provider_config.json"),
+        ]
     }
 
     fn provider_scan(&self) -> Option<AgentScan> {

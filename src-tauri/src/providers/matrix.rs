@@ -16,7 +16,7 @@ use super::model::Provider;
 use super::store;
 use crate::agents;
 // 列结构定义在 types.rs，和前端契约一一对应
-pub use crate::types::{AgentColumn, ProviderMatrix, ProviderView};
+pub use crate::types::{AgentColumn, ClaudeModelMap, ProviderMatrix, ProviderView};
 
 /// 把一条 provider 转成界面展示结构。key 只给长度和末尾 4 位。
 fn to_view(p: &Provider) -> ProviderView {
@@ -42,6 +42,7 @@ fn to_view(p: &Provider) -> ProviderView {
             .collect(),
         models: p.models.clone(),
         agents: p.agents.clone(),
+        claude_model_map: p.claude_model_map.clone(),
         note: p.note.clone(),
         key_len: p.api_key.len(),
         key_tail: if p.api_key.len() >= 4 {
@@ -90,7 +91,11 @@ pub fn build() -> anyhow::Result<ProviderMatrix> {
 ///
 /// 一次写整行，避免逐格写入留下中间状态。
 /// 声明了单槽位的 agent 会从其他 provider 上摘掉，保证只有一个生效。
-pub fn set_row(provider_id: &str, agents_in: &[String]) -> anyhow::Result<()> {
+pub fn set_row(
+    provider_id: &str,
+    agents_in: &[String],
+    claude_map: Option<ClaudeModelMap>,
+) -> anyhow::Result<()> {
     let mut providers = store::load_or_default()?;
 
     // 只接受已知的、且支持 provider 注入的 agent 名
@@ -129,6 +134,9 @@ pub fn set_row(provider_id: &str, agents_in: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("母版里没有 provider：{provider_id}");
     };
     target.agents = clean;
+    if let Some(map) = claude_map {
+        target.claude_model_map = map;
+    }
 
     store::save(&providers)
 }
@@ -151,5 +159,5 @@ pub fn set_assignment(provider_id: &str, agent: &str, on: bool) -> anyhow::Resul
         next.retain(|a| a != agent);
     }
 
-    set_row(provider_id, &next)
+    set_row(provider_id, &next, None)
 }

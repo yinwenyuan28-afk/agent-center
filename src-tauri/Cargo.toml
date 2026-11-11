@@ -57,6 +57,9 @@ clap = { version = "4", features = ["derive"] }
 # 时间戳：备份目录名、lock 时间比较
 chrono = { version = "0.4", features = ["serde"] }
 
+# Claude 协议转换：把 Messages 请求转发给 OpenAI Chat / Responses
+ureq = "2.12"
+
 [features]
 # Tauri 2 的默认特性组合
 default = ["custom-protocol"]

@@ -207,6 +207,20 @@ export interface ModelSpec {
   cost?: ModelCost;
 }
 
+/**
+ * Claude Code 档位 → 本 provider 模型 id。
+ *
+ * 对应 settings.json 里的 ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL
+ * 与 ANTHROPIC_MODEL。字段名与母版一致：default 不是 defaultModel。
+ */
+export interface ClaudeModelMap {
+  opus?: string;
+  sonnet?: string;
+  haiku?: string;
+  /** 对应 ANTHROPIC_MODEL */
+  default?: string;
+}
+
 /** 母版里的一条 provider。不含密钥原文，只有长度和末尾。 */
 export interface ProviderView {
   id: string;
@@ -227,6 +241,8 @@ export interface ProviderView {
   /** 模型列表，带能力元数据 */
   models: ModelSpec[];
   agents: string[];
+  /** Claude Code 档位映射；未配置时为空对象 */
+  claudeModelMap: ClaudeModelMap;
   note: string;
   /** key 长度，0 表示没配 */
   keyLen: number;

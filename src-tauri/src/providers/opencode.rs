@@ -7,16 +7,14 @@
 //!
 //! 注意 auth.json 在 `~/.local/share/` 下，不在 `.config/opencode/` 里。
 //!
-//! ## 和新旧两种 schema 的兼容
+//! ## V1 / V2 schema
 //!
-//! opencode 有两套写法：新版 `providers`（key 单独存 auth.json）
-//! 和已废弃但仍在接受的旧版 `provider`（key 可直接写在 `options.apiKey`）。
-//! 这里**统一写新版 `providers`**，因为：
+//! OpenCode Desktop 1.x 只认顶层 `provider`（`npm` + `options.baseURL`）。
+//! V2（2.x）改用 `providers`（`package` + `settings.baseURL`），并把旧键
+//! 标成废弃；在 V1 里写 `providers` 会直接 ConfigInvalidError。
 //!
-//! - 新版是当前 schema，旧版标注已废弃
-//! - key 分离存储更安全，也和我们"唯一 key 来源"的目标一致
-//!
-//! 如果文件里已经有旧版 `provider` 段，不动它 —— 那是用户手动配的。
+//! 注入器按本机已装版本选择写法：major < 2 走 V1，否则走 V2。
+//! 探测失败时默认 V1（当前桌面端主流），避免再把配置写成 OpenCode 拒收。
 
 use super::model::{DiffAction, DiffLine, FilePlan, ModelSpec, Provider, ProviderKind};
 use super::safe_write::hash_file;
@@ -26,6 +24,14 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 pub struct OpencodeInjector;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Schema {
+    /// 顶层 `provider`，字段 `npm` / `options`
+    V1,
+    /// 顶层 `providers`，字段 `package` / `settings`
+    V2,
+}
 
 impl OpencodeInjector {
     fn config_path() -> PathBuf {
@@ -44,12 +50,80 @@ impl OpencodeInjector {
     }
 }
 
-/// 把统一协议映射成 opencode 的 package 字段。
-///
-/// opencode 用「运行时 provider 包」表达协议。它自己没有单独的
-/// responses 包，所以 OpenaiResponses 也走 openai-compatible 包 ——
-/// 这在这里是安全的，因为 responses 和 chat 共用同一个兼容层。
-fn opencode_package(kind: ProviderKind) -> &'static str {
+/// 探测本机 OpenCode 该用哪套 schema。
+fn detect_schema() -> Schema {
+    if let Some(major) = installed_major_version() {
+        if major >= 2 {
+            return Schema::V2;
+        }
+        return Schema::V1;
+    }
+    Schema::V1
+}
+
+/// 尽量读出已装 OpenCode 的主版本号。读不到就返回 None。
+fn installed_major_version() -> Option<u32> {
+    // Windows 桌面端：读 OpenCode.exe 的文件版本
+    #[cfg(windows)]
+    {
+        if let Some(v) = windows_desktop_file_version() {
+            return Some(v);
+        }
+    }
+
+    // PATH 上的 CLI：`opencode --version`
+    if let Ok(out) = std::process::Command::new("opencode")
+        .arg("--version")
+        .output()
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if let Some(m) = parse_major(text.trim()) {
+            return Some(m);
+        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        if let Some(m) = parse_major(err.trim()) {
+            return Some(m);
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn windows_desktop_file_version() -> Option<u32> {
+    let local = std::env::var_os("LOCALAPPDATA")?;
+    let exe = PathBuf::from(local)
+        .join("Programs")
+        .join("@opencode-aidesktop")
+        .join("OpenCode.exe");
+    if !exe.exists() {
+        return None;
+    }
+    // PowerShell 比额外链 winapi 轻：只在注入时跑一次。
+    let path = exe.display().to_string().replace('\'', "''");
+    let script = format!("(Get-Item -LiteralPath '{path}').VersionInfo.FileVersion");
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    parse_major(text.trim())
+}
+
+fn parse_major(s: &str) -> Option<u32> {
+    // 接受 "1.18.2" / "v2.0.27" / "opencode 1.18.2" 等
+    let start = s.find(|c: char| c.is_ascii_digit())?;
+    let digits: String = s[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// V2：运行时 provider 包。
+fn opencode_package_v2(kind: ProviderKind) -> &'static str {
     match kind {
         ProviderKind::Anthropic => "@opencode/ai/providers/anthropic",
         ProviderKind::OpenaiChat
@@ -58,21 +132,25 @@ fn opencode_package(kind: ProviderKind) -> &'static str {
     }
 }
 
-/// 构造 opencode 的 provider 定义（`providers.<id>` 那一条）。
-fn to_opencode_provider(p: &Provider) -> Value {
-    let mut obj = Map::new();
-    obj.insert("name".into(), Value::String(p.name.clone()));
-    obj.insert(
-        "package".into(),
-        Value::String(opencode_package(p.kind_for("opencode")).to_string()),
+/// V1：AI SDK npm 包。responses 走 `@ai-sdk/openai`，其余兼容层走 openai-compatible。
+fn opencode_npm_v1(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Anthropic => "@ai-sdk/anthropic",
+        ProviderKind::OpenaiResponses => "@ai-sdk/openai",
+        ProviderKind::OpenaiChat | ProviderKind::GoogleGenAi => "@ai-sdk/openai-compatible",
+    }
+}
+
+fn make_opencode_model(spec: &ModelSpec) -> Value {
+    let mut m = Map::new();
+    m.insert(
+        "name".into(),
+        Value::String(spec.display_name().to_string()),
     );
+    Value::Object(m)
+}
 
-    // baseURL 在 settings 里，不是顶层
-    let mut settings = Map::new();
-    settings.insert("baseURL".into(), Value::String(p.base_url.clone()));
-    obj.insert("settings".into(), Value::Object(settings));
-
-    // models 是 map，key 是 modelID
+fn models_object(p: &Provider) -> Value {
     let mut models = Map::new();
     if p.models.is_empty() {
         models.insert(
@@ -84,22 +162,69 @@ fn to_opencode_provider(p: &Provider) -> Value {
             models.insert(spec.id.clone(), make_opencode_model(spec));
         }
     }
-    obj.insert("models".into(), Value::Object(models));
+    Value::Object(models)
+}
 
+fn to_opencode_provider(p: &Provider, schema: Schema) -> Value {
+    let mut obj = Map::new();
+    obj.insert("name".into(), Value::String(p.name.clone()));
+    let kind = p.kind_for("opencode");
+
+    match schema {
+        Schema::V1 => {
+            obj.insert(
+                "npm".into(),
+                Value::String(opencode_npm_v1(kind).to_string()),
+            );
+            let mut options = Map::new();
+            options.insert("baseURL".into(), Value::String(p.base_url.clone()));
+            obj.insert("options".into(), Value::Object(options));
+        }
+        Schema::V2 => {
+            obj.insert(
+                "package".into(),
+                Value::String(opencode_package_v2(kind).to_string()),
+            );
+            let mut settings = Map::new();
+            settings.insert("baseURL".into(), Value::String(p.base_url.clone()));
+            obj.insert("settings".into(), Value::Object(settings));
+        }
+    }
+
+    obj.insert("models".into(), models_object(p));
     Value::Object(obj)
 }
 
-/// 构造一个 opencode 模型条目。
-///
-/// opencode 的模型定义以它的模型目录为准，这里只写名称。
-/// 母版填了展示名就用母版的。
-fn make_opencode_model(spec: &ModelSpec) -> Value {
-    let mut m = Map::new();
-    m.insert(
-        "name".into(),
-        Value::String(spec.display_name().to_string()),
-    );
-    Value::Object(m)
+fn top_key(schema: Schema) -> &'static str {
+    match schema {
+        Schema::V1 => "provider",
+        Schema::V2 => "providers",
+    }
+}
+
+fn read_base_url(existing: &Value) -> &str {
+    existing
+        .get("settings")
+        .and_then(|s| s.get("baseURL"))
+        .or_else(|| existing.get("options").and_then(|o| o.get("baseURL")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+}
+
+fn read_pkg(existing: &Value) -> &str {
+    existing
+        .get("package")
+        .or_else(|| existing.get("npm"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+}
+
+fn expected_pkg(p: &Provider, schema: Schema) -> &'static str {
+    let kind = p.kind_for("opencode");
+    match schema {
+        Schema::V1 => opencode_npm_v1(kind),
+        Schema::V2 => opencode_package_v2(kind),
+    }
 }
 
 impl Injector for OpencodeInjector {
@@ -129,11 +254,13 @@ impl Injector for OpencodeInjector {
             return Ok(Vec::new());
         }
 
-        // 取消分配的 provider：两个文件里都要摘掉
         let unassigned: Vec<&Provider> = providers
             .iter()
             .filter(|p| !p.agents.iter().any(|a| a == "opencode"))
             .collect();
+
+        let schema = detect_schema();
+        let key = top_key(schema);
 
         let mut plans = Vec::new();
 
@@ -156,18 +283,32 @@ impl Injector for OpencodeInjector {
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("{} 顶层不是对象", cfg_path.display()))?;
 
-        if !root.contains_key("providers") {
-            root.insert("providers".into(), Value::Object(Map::new()));
-        }
-        let providers_map = root
-            .get_mut("providers")
-            .and_then(|v| v.as_object_mut())
-            .ok_or_else(|| anyhow::anyhow!("{} 的 providers 不是对象", cfg_path.display()))?;
-
         let mut cfg_summary = Vec::new();
         let mut cfg_changed = false;
 
-        // 先移除未分配的 provider 定义
+        // V1 拒收顶层 `providers`；V2 虽仍接受旧 `provider` 但会忽略。
+        // 按当前 schema 清掉对立键，避免 OpenCode 直接报 ConfigInvalidError。
+        match schema {
+            Schema::V1 => {
+                if root.remove("providers").is_some() {
+                    cfg_summary.push("移除不被 V1 接受的顶层 providers".to_string());
+                    cfg_changed = true;
+                }
+            }
+            Schema::V2 => {
+                // 不动用户手写的旧 provider 段；只保证我们写在 providers 下
+            }
+        }
+
+        if !root.contains_key(key) {
+            root.insert(key.into(), Value::Object(Map::new()));
+            cfg_changed = true;
+        }
+        let providers_map = root
+            .get_mut(key)
+            .and_then(|v| v.as_object_mut())
+            .ok_or_else(|| anyhow::anyhow!("{} 的 {key} 不是对象", cfg_path.display()))?;
+
         for p in &unassigned {
             if providers_map.remove(p.id.as_str()).is_some() {
                 cfg_summary.push(format!("移除 {} 的定义（未分配给 opencode）", p.name));
@@ -176,36 +317,56 @@ impl Injector for OpencodeInjector {
         }
 
         for p in &wanted {
-            let new_def = to_opencode_provider(p);
+            let new_def = to_opencode_provider(p, schema);
+            let want_pkg = expected_pkg(p, schema);
 
             match providers_map.get(p.id.as_str()) {
                 Some(existing) => {
-                    // 只比对 baseURL 和 package，不同才改。
-                    // models 不覆盖，用户可能调过。
-                    let old_base = existing
-                        .get("settings")
-                        .and_then(|s| s.get("baseURL"))
-                        .or_else(|| existing.get("options").and_then(|o| o.get("baseURL")))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let old_pkg = existing.get("package").and_then(|v| v.as_str()).unwrap_or("");
+                    let old_base = read_base_url(existing);
+                    let old_pkg = read_pkg(existing);
 
-                    if old_base != p.base_url || old_pkg != opencode_package(p.kind_for("opencode")) {
+                    if old_base != p.base_url || old_pkg != want_pkg {
                         if let Some(obj) =
                             providers_map.get_mut(p.id.as_str()).and_then(|v| v.as_object_mut())
                         {
-                            // settings.baseURL 要保证存在
-                            let settings = obj
-                                .entry("settings")
-                                .or_insert_with(|| Value::Object(Map::new()));
-                            if let Some(s) = settings.as_object_mut() {
-                                s.insert("baseURL".into(), Value::String(p.base_url.clone()));
+                            match schema {
+                                Schema::V1 => {
+                                    let options = obj
+                                        .entry("options")
+                                        .or_insert_with(|| Value::Object(Map::new()));
+                                    if let Some(o) = options.as_object_mut() {
+                                        o.insert(
+                                            "baseURL".into(),
+                                            Value::String(p.base_url.clone()),
+                                        );
+                                    }
+                                    obj.insert(
+                                        "npm".into(),
+                                        Value::String(want_pkg.to_string()),
+                                    );
+                                    // 清掉误写的 V2 字段，避免混用
+                                    obj.remove("package");
+                                    obj.remove("settings");
+                                }
+                                Schema::V2 => {
+                                    let settings = obj
+                                        .entry("settings")
+                                        .or_insert_with(|| Value::Object(Map::new()));
+                                    if let Some(s) = settings.as_object_mut() {
+                                        s.insert(
+                                            "baseURL".into(),
+                                            Value::String(p.base_url.clone()),
+                                        );
+                                    }
+                                    obj.insert(
+                                        "package".into(),
+                                        Value::String(want_pkg.to_string()),
+                                    );
+                                    obj.remove("npm");
+                                    obj.remove("options");
+                                }
                             }
-                            obj.insert(
-                                "package".into(),
-                                Value::String(opencode_package(p.kind_for("opencode")).to_string()),
-                            );
-                            cfg_summary.push(format!("更新 {} 的 baseURL/package", p.name));
+                            cfg_summary.push(format!("更新 {} 的 baseURL/包名", p.name));
                             cfg_changed = true;
                         }
                     } else {
@@ -260,7 +421,6 @@ impl Injector for OpencodeInjector {
         let mut auth_summary = Vec::new();
         let mut auth_changed = false;
 
-        // 先移除未分配的 key
         for p in &unassigned {
             if auth_obj.remove(p.id.as_str()).is_some() {
                 auth_summary.push(format!("移除 {} 的 key（未分配给 opencode）", p.name));
@@ -337,7 +497,7 @@ impl Injector for OpencodeInjector {
 
                 let action = if detail.starts_with("新增") {
                     DiffAction::Add
-                } else if detail.starts_with("更新") {
+                } else if detail.starts_with("更新") || detail.starts_with("移除不被") {
                     DiffAction::Update
                 } else {
                     DiffAction::Unchanged

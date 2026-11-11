@@ -2,11 +2,11 @@
   /**
    * Provider 管理页。
    *
-   * 和 MCP 页同一套交互：上面是 provider 池，默认只列清单，
-   * 点某一行的「分配」才展开该 provider 的 agent 选择面板。
+   * 列表只留 provider 本身（标识、协议、端点），不展开模型和已分配的 agent。
+   * 编辑在对话框里完成。点「分配」进入单独一页，选择这个 provider 注入到哪些 agent。
    *
    * 分配关系直接写母版（`~/.agents/providers.toml` 的 `agents` 字段），
-   * 点右上角「应用到各 agent」才真正改各家的配置文件。
+   * 点「应用到各 agent」才真正改各家的配置文件。
    *
    * 安全设计：key 编辑框留空表示不修改，避免误清空；
    * 界面上只显示 key 长度和末尾 4 位，原文不跨进程边界。
@@ -17,8 +17,7 @@
     Trash2,
     Pencil,
     Check,
-    ChevronDown,
-    ChevronRight,
+    ArrowLeft,
     RefreshCw,
     Play,
     KeyRound,
@@ -35,7 +34,7 @@
     syncProviders,
     writeProvidersToml,
   } from '../lib/ipc';
-  import type { ModelSpec, ProviderMatrix, ProviderView } from '../lib/types';
+  import type { ClaudeModelMap, ModelSpec, ProviderMatrix, ProviderView } from '../lib/types';
   import PageHead from '../lib/components/PageHead.svelte';
   import Button from '../lib/components/Button.svelte';
   import Badge from '../lib/components/Badge.svelte';
@@ -47,8 +46,13 @@
   let busy = $state(false);
   let log = $state('');
 
-  /** 当前展开分配面板的 provider id。null 表示全部收起。 */
-  let expanded = $state<string | null>(null);
+  /** 正在分配页里操作的 provider id。null 表示停在列表。 */
+  let assigningId = $state<string | null>(null);
+
+  /** 分配页当前这一条。加载后对不上就留空，页面会提示返回。 */
+  let assigningRow = $derived(
+    assigningId ? (matrix?.providers.find((p) => p.id === assigningId) ?? null) : null,
+  );
 
   // 编辑表单
   let editing = $state<ProviderView | null>(null);
@@ -68,6 +72,32 @@
   /** 当前展开元数据编辑的那张模型卡片。键是 provider id + 模型 id。 */
   let openModel = $state<string | null>(null);
 
+  /** 「各 agent 实际用的协议」默认折叠，少占编辑区。 */
+  let showAgentKinds = $state(false);
+
+  /** 模型高级配置（模态 / 推理）默认折叠，对齐 zcode 编辑体验。 */
+  let showModelAdvanced = $state(false);
+
+  /**
+   * Claude 档位映射弹窗。启用 Claude 时必填一次；已启用可再点「编辑映射」。
+   * pendingAgents：确认后要写入的整行分配（启用场景会带上 claude）。
+   */
+  let claudeMapDialog = $state<null | {
+    providerId: string;
+    pendingAgents: string[];
+    map: { opus: string; sonnet: string; haiku: string; default: string };
+    mode: 'enable' | 'edit';
+  }>(null);
+
+  const MODALITY_OPTIONS = [
+    { value: 'text', label: '文本' },
+    { value: 'image', label: '图片' },
+    { value: 'video', label: '视频' },
+    { value: 'pdf', label: 'PDF' },
+  ] as const;
+
+  const EFFORT_OPTIONS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
   /** 空模型：只填了 id 的状态。 */
   function blankModel(id = ''): ModelSpec {
     return {
@@ -78,12 +108,23 @@
     };
   }
 
+  /** 把后端可能省略的数组补成空数组，避免渲染时读 .length 崩掉。 */
+  function normalizeModel(m: ModelSpec): ModelSpec {
+    return {
+      ...m,
+      inputModalities: m.inputModalities ?? [],
+      outputModalities: m.outputModalities ?? [],
+      reasoningEfforts: m.reasoningEfforts ?? [],
+    };
+  }
+
   /** 折叠态的一行能力摘要。 */
   function modelSummary(m: ModelSpec): string {
     const bits: string[] = [];
     if (m.contextWindow) bits.push(`${fmtK(m.contextWindow)} ctx`);
     if (m.maxOutputTokens) bits.push(`${fmtK(m.maxOutputTokens)} out`);
-    if (m.inputModalities.length > 0) bits.push(m.inputModalities.join('+'));
+    const inputs = m.inputModalities ?? [];
+    if (inputs.length > 0) bits.push(inputs.join('+'));
     if (m.reasoning) bits.push('reasoning');
     return bits.length > 0 ? bits.join(' · ') : '未填元数据';
   }
@@ -95,8 +136,33 @@
     return String(n);
   }
 
+  /** 表单展示用 k token；母版里仍存原始 token 数。 */
+  function tokensToK(n: number | undefined | null): string {
+    if (n == null || Number.isNaN(n)) return '';
+    if (n % 1000 === 0) return String(n / 1000);
+    return String(Math.round((n / 1000) * 10) / 10);
+  }
+
+  function kToTokens(raw: string): number | undefined {
+    const t = raw.trim();
+    if (!t) return undefined;
+    const v = Number(t);
+    if (!Number.isFinite(v) || v < 0) return undefined;
+    return Math.round(v * 1000);
+  }
+
+  function openModelEditor(key: string) {
+    openModel = openModel === key ? null : key;
+    showModelAdvanced = false;
+  }
+
+  function overrideCount(): number {
+    return Object.keys(form.agentKinds).length;
+  }
+
   /** 切换模型上的一个模态。 */
   function toggleModality(m: ModelSpec, list: 'inputModalities' | 'outputModalities', value: string) {
+    if (!m[list]) m[list] = [];
     const arr = m[list];
     const i = arr.indexOf(value);
     if (i >= 0) arr.splice(i, 1);
@@ -105,6 +171,7 @@
 
   /** 切换模型上的一个推理档位。 */
   function toggleEffort(m: ModelSpec, value: string) {
+    if (!m.reasoningEfforts) m.reasoningEfforts = [];
     const i = m.reasoningEfforts.indexOf(value);
     if (i >= 0) m.reasoningEfforts.splice(i, 1);
     else m.reasoningEfforts.push(value);
@@ -156,8 +223,25 @@
           ),
         ]);
 
-      matrix = await withTimeout(providerMatrix(), '读取分配矩阵');
-      providers = await withTimeout(listProviders(), '读取 provider 列表');
+      const rawMatrix = await withTimeout(providerMatrix(), '读取分配矩阵');
+      // 兜底：旧后端可能省略空数组，这里统一补齐，避免列表渲染崩回骨架屏
+      matrix = {
+        ...rawMatrix,
+        providers: (rawMatrix.providers ?? []).map((p) => ({
+          ...p,
+          agentKinds: p.agentKinds ?? {},
+          models: (p.models ?? []).map(normalizeModel),
+          agents: p.agents ?? [],
+          claudeModelMap: p.claudeModelMap ?? {},
+        })),
+      };
+      providers = (await withTimeout(listProviders(), '读取 provider 列表')).map((p) => ({
+        ...p,
+        agentKinds: p.agentKinds ?? {},
+        models: (p.models ?? []).map(normalizeModel),
+        agents: p.agents ?? [],
+        claudeModelMap: p.claudeModelMap ?? {},
+      }));
     } catch (e) {
       log = `读取失败：${e instanceof Error ? e.message : String(e)}`;
       console.error('[Providers] load failed', e);
@@ -169,16 +253,6 @@
   /** 某个 provider 当前的分配列表。 */
   function assignedOf(id: string): string[] {
     return matrix?.providers.find((p) => p.id === id)?.agents ?? [];
-  }
-
-  /** 把 agent id 换成展示名。查不到就原样返回。 */
-  function labelOf(agent: string): string {
-    return matrix?.columns.find((c) => c.agent === agent)?.label ?? agent;
-  }
-
-  /** 把协议标识换成展示名。 */
-  function kindLabelOf(kind: string): string {
-    return KIND_OPTIONS.find((k) => k.value === kind)?.label ?? kind;
   }
 
   /**
@@ -198,20 +272,109 @@
     return assignedOf(providerId).includes(agent);
   }
 
+  /** 从 provider 模型列表推断档位默认值；已有映射优先。 */
+  function suggestClaudeMap(p: ProviderView): {
+    opus: string;
+    sonnet: string;
+    haiku: string;
+    default: string;
+  } {
+    const ids = p.models.map((m) => m.id).filter(Boolean);
+    const pick = (i: number) => (ids.length === 0 ? '' : ids[Math.min(i, ids.length - 1)]!);
+    const existing = p.claudeModelMap ?? {};
+    return {
+      opus: existing.opus ?? pick(0),
+      sonnet: existing.sonnet ?? pick(1),
+      haiku: existing.haiku ?? pick(2),
+      default: existing.default ?? pick(0),
+    };
+  }
+
+  function openClaudeMapDialog(
+    providerId: string,
+    pendingAgents: string[],
+    mode: 'enable' | 'edit',
+  ) {
+    const row = matrix?.providers.find((p) => p.id === providerId);
+    if (!row) return;
+    claudeMapDialog = {
+      providerId,
+      pendingAgents,
+      map: suggestClaudeMap(row),
+      mode,
+    };
+  }
+
+  function closeClaudeMapDialog() {
+    claudeMapDialog = null;
+  }
+
+  /** 确认映射：写入分配行 + claude_model_map。 */
+  async function confirmClaudeMap() {
+    const dlg = claudeMapDialog;
+    if (!dlg) return;
+    const map: ClaudeModelMap = {
+      opus: dlg.map.opus || undefined,
+      sonnet: dlg.map.sonnet || undefined,
+      haiku: dlg.map.haiku || undefined,
+      default: dlg.map.default || undefined,
+    };
+
+    const providerId = dlg.providerId;
+    const next = dlg.pendingAgents;
+    const row = matrix?.providers.find((p) => p.id === providerId);
+    const prevAgents = row ? [...row.agents] : [];
+    const prevMap = row ? { ...(row.claudeModelMap ?? {}) } : {};
+
+    // 单槽位互斥：本地先清掉其他 provider 上的 claude
+    if (matrix && next.includes('claude')) {
+      for (const other of matrix.providers) {
+        if (other.id !== providerId) {
+          other.agents = other.agents.filter((a) => a !== 'claude');
+        }
+      }
+      providers = providers.map((p) =>
+        p.id === providerId ? p : { ...p, agents: p.agents.filter((a) => a !== 'claude') },
+      );
+    }
+
+    if (row) {
+      row.agents = next;
+      row.claudeModelMap = map;
+    }
+    providers = providers.map((p) =>
+      p.id === providerId ? { ...p, agents: next, claudeModelMap: map } : p,
+    );
+    claudeMapDialog = null;
+
+    try {
+      const r = await setProviderRow(providerId, next, map);
+      if (!r.ok) throw new Error(r.output);
+      await load();
+    } catch (e) {
+      if (row) {
+        row.agents = prevAgents;
+        row.claudeModelMap = prevMap;
+      }
+      log = `写入失败：${e instanceof Error ? e.message : String(e)}`;
+      await load();
+    }
+  }
+
   /**
    * 切换某个 provider 在某个 agent 的分配。
    *
-   * 乐观更新，失败回滚。Claude 是单槽位，勾上它会自动取消别的
-   * provider 上的 claude —— 所以成功后重新拉一次矩阵，别自己猜。
+   * 只由卡片左侧的勾选调用。乐观更新，失败回滚。
+   * 单槽位 agent 勾上后会自动摘掉其他 provider 上的同一个 agent。
    */
   async function toggleAgent(providerId: string, agent: string) {
     const row = matrix?.providers.find((p) => p.id === providerId);
     if (!row) return;
 
     const on = !row.agents.includes(agent);
-    let next = on ? [...row.agents, agent] : row.agents.filter((a) => a !== agent);
+    const next = on ? [...row.agents, agent] : row.agents.filter((a) => a !== agent);
 
-    // 单槽位 agent（Claude）：本地先做互斥，界面不会出现两条同时高亮。
+    // 单槽位 agent：本地先做互斥，界面不会出现两条同时高亮。
     // 哪些 agent 是单槽位由后端 `col.singleSlot` 声明，前端不写死名字。
     const slot = matrix?.columns.find((c) => c.agent === agent);
     if (on && slot?.singleSlot && matrix) {
@@ -237,6 +400,19 @@
       log = `写入失败：${e instanceof Error ? e.message : String(e)}`;
       await load();
     }
+  }
+
+  /** 点卡片正文时要打开的额外配置。没有就返回 null，正文不可点。 */
+  function agentDetail(agent: string): 'claude-map' | null {
+    if (agent === 'claude') return 'claude-map';
+    return null;
+  }
+
+  /** 打开这个 agent 的额外配置。不改启用状态。 */
+  function openAgentDetail(providerId: string, agent: string) {
+    const row = matrix?.providers.find((p) => p.id === providerId);
+    if (!row || agentDetail(agent) !== 'claude-map') return;
+    openClaudeMapDialog(providerId, [...row.agents], 'edit');
   }
 
   /** 全选 / 全不选所有可用 agent。Claude 仍只保留这一个 provider。 */
@@ -296,6 +472,9 @@
   function startNew() {
     isNew = true;
     editing = null;
+    openModel = null;
+    showAgentKinds = false;
+    showModelAdvanced = false;
     form = {
       id: '',
       name: '',
@@ -313,6 +492,9 @@
     if (!p) return;
     isNew = false;
     editing = p;
+    openModel = null;
+    showAgentKinds = false;
+    showModelAdvanced = false;
     form = {
       id: p.id,
       name: p.name,
@@ -321,13 +503,16 @@
       // 留空表示不修改
       apiKey: '',
       // 深拷贝：编辑时改动不应该提前影响列表里的对象
-      models: p.models.map((m) => ({
-        ...m,
-        inputModalities: [...m.inputModalities],
-        outputModalities: [...m.outputModalities],
-        reasoningEfforts: [...m.reasoningEfforts],
-      })),
-      agentKinds: { ...p.agentKinds },
+      models: p.models.map((raw) => {
+        const m = normalizeModel(raw);
+        return {
+          ...m,
+          inputModalities: [...m.inputModalities],
+          outputModalities: [...m.outputModalities],
+          reasoningEfforts: [...m.reasoningEfforts],
+        };
+      }),
+      agentKinds: { ...(p.agentKinds ?? {}) },
       note: p.note,
     };
   }
@@ -354,6 +539,9 @@
   function cancelEdit() {
     editing = null;
     isNew = false;
+    openModel = null;
+    showAgentKinds = false;
+    showModelAdvanced = false;
   }
 
   async function submit() {
@@ -447,15 +635,157 @@
   onMount(load);
 </script>
 
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key !== 'Escape' || busy) return;
+    if (isNew || editing) cancelEdit();
+    else if (claudeMapDialog) closeClaudeMapDialog();
+    else if (assigningId) assigningId = null;
+  }}
+/>
+
+{#if assigningId}
+  <button
+    type="button"
+    class="mb-4 inline-flex items-center gap-1.5 text-[13px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+    onclick={() => (assigningId = null)}
+  >
+    <ArrowLeft size={14} />
+    返回 provider 列表
+  </button>
+
+  {#if loading}
+    <div class="flex flex-col gap-2">
+      {#each Array(3) as _, i (i)}
+        <div class="h-16 animate-pulse rounded-[var(--radius-lg)] bg-[var(--color-bg-muted)]"></div>
+      {/each}
+    </div>
+  {:else if !assigningRow || !matrix}
+    <PageHead title="分配">这条 provider 已经不在池里。</PageHead>
+  {:else}
+    {@const row = assigningRow}
+    <PageHead title="分配 {row.name || row.id}">
+      勾选左侧圆点启用或取消。Claude Code 这类要额外配置的，点卡片其余部分打开设置。勾选会记到母版，点「应用到各 agent」才写入各家配置。
+    </PageHead>
+
+    <div class="mb-4 flex flex-wrap items-center gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="font-[var(--font-mono)] text-[13px] font-medium">{row.id}</span>
+          <Badge tone={row.kind === 'anthropic' ? 'info' : 'plain'}>{row.kindLabel}</Badge>
+        </div>
+        <div
+          class="truncate font-[var(--font-mono)] text-[11px] text-[var(--color-text-faint)]"
+          title={row.baseUrl}
+        >
+          {row.baseUrl}
+        </div>
+      </div>
+      <Button variant="primary" onclick={apply} disabled={busy}>
+        <Play size={14} />
+        {busy ? '处理中…' : '应用到各 agent'}
+      </Button>
+    </div>
+
+    <div class="rounded-[var(--radius-lg)] border border-[var(--color-border)] p-4">
+      <div class="mb-3 flex items-center gap-2">
+        <span class="text-[13px] font-medium text-[var(--color-text)]">注入到这些 agent</span>
+        <span class="flex-1"></span>
+        <button
+          type="button"
+          class="text-[12px] text-[var(--color-text-muted)] underline-offset-2 hover:text-[var(--color-accent)] hover:underline"
+          onclick={() => toggleAllAgents(row.id)}
+        >
+          {matrix.columns.filter((c) => c.available).every((c) => row.agents.includes(c.agent))
+            ? '全不选'
+            : '全选'}
+        </button>
+      </div>
+
+      <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+        {#each matrix.columns as col (col.agent)}
+          {@const on = isAssigned(row.id, col.agent)}
+          {@const detail = col.available ? agentDetail(col.agent) : null}
+          <div
+            class="flex items-center gap-1 rounded-[var(--radius-md)] border py-1.5 pl-1.5 pr-3 transition-colors {!col.available
+              ? 'border-[var(--color-border)] opacity-40'
+              : on
+                ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white shadow-sm'
+                : 'border-[var(--color-border-strong)] bg-[var(--color-bg)] text-[var(--color-text)]'}"
+          >
+            <button
+              type="button"
+              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-transparent text-inherit disabled:cursor-not-allowed"
+              disabled={!col.available || busy}
+              title={col.available
+                ? `${on ? '取消' : '启用'}「${row.id}」在 ${col.label}`
+                : `${col.label} 不可用：${col.note}`}
+              aria-pressed={on}
+              aria-label={`${on ? '取消' : '启用'} ${col.label}`}
+              onclick={() => toggleAgent(row.id, col.agent)}
+            >
+              <span
+                class="flex h-5 w-5 items-center justify-center rounded-full border transition-colors {on
+                  ? 'border-white/60 bg-white/20'
+                  : 'border-[var(--color-border-strong)]'}"
+              >
+                {#if on}
+                  <Check size={11} class={on ? 'text-white' : ''} />
+                {/if}
+              </span>
+            </button>
+
+            {#if detail}
+              <button
+                type="button"
+                class="min-w-0 flex-1 rounded-[var(--radius-sm)] px-1.5 py-1 text-left text-inherit {on
+                  ? 'hover:bg-white/10'
+                  : 'hover:bg-[var(--color-bg-hover)]'}"
+                disabled={busy}
+                aria-label={`配置 ${col.label}`}
+                onclick={() => openAgentDetail(row.id, col.agent)}
+              >
+                <span class="block truncate text-[12px] font-medium">{col.label}</span>
+                <span class="block text-[10px] {on ? 'opacity-80' : 'text-[var(--color-text-faint)]'}">
+                  {on ? '已启用' : '未启用'} · 配置档位
+                </span>
+              </button>
+            {:else}
+              <span class="min-w-0 flex-1 px-1.5 py-1">
+                <span class="block truncate text-[12px] font-medium">{col.label}</span>
+                {#if !col.available}
+                  <span class="block text-[10px] opacity-70">未安装</span>
+                {:else if on}
+                  <span class="block text-[10px] opacity-80">已启用</span>
+                {:else}
+                  <span class="block text-[10px] text-[var(--color-text-faint)]">未启用</span>
+                {/if}
+              </span>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    </div>
+
+    <div class="mt-4 rounded-[var(--radius-lg)] border border-[var(--color-border)] p-3">
+      <div class="text-[12px] leading-relaxed text-[var(--color-text-muted)]">
+        <strong class="font-medium text-[var(--color-text)]">单槽位的 agent 只有一个生效。</strong>
+        这类 agent（如 Claude Code）同一时刻只能有一个 provider，勾上它会自动取消其他 provider 上的同一个 agent。
+        <span class="mt-1 flex items-start gap-1 text-[var(--color-text-faint)]">
+          <TriangleAlert size={12} class="mt-0.5 shrink-0" />
+          勾选会立刻写入母版。应用到各 agent 之前，请先退出正在运行的 agent，避免它们退出时用内存里的配置覆盖这次改动。
+        </span>
+      </div>
+    </div>
+  {/if}
+{:else}
 <PageHead title="Provider">
-  所有 provider 在一个池子里，每个只保留一把 key。点某一行的
-  <strong class="font-medium text-[var(--color-text)]">「分配」</strong>
-  展开，选择这个 provider 要用在哪些 agent 上。
+  每个 provider 只保留一把 key。编辑在对话框里完成；点「分配」进入单独页面，选择要用在哪些 agent 上。
   <br />
   <span class="text-[var(--color-text-muted)]">
-    改动先写母版（<code class="font-[var(--font-mono)] text-[11px]"
+    母版在 <code class="font-[var(--font-mono)] text-[11px]"
       >~/.agents/providers.toml</code
-    >，含明文 key，已在 .gitignore 中隔离），点「应用到各 agent」才真正写入配置文件。
+    >，含明文 key，已在 .gitignore 中隔离。写入各家配置在分配页完成。
   </span>
 </PageHead>
 
@@ -473,26 +803,43 @@
     <RefreshCw size={14} />
     刷新
   </Button>
-  <Button variant="primary" onclick={apply} disabled={busy || loading}>
-    <Play size={14} />
-    {busy ? '处理中…' : '应用到各 agent'}
-  </Button>
 </div>
 
-<!-- 编辑表单 -->
+<!-- 编辑对话框。点遮罩或取消关闭，不自动保存。 -->
 {#if isNew || editing}
   <div
-    class="mb-4 rounded-[var(--radius-lg)] border border-[var(--color-accent)] bg-[var(--color-bg-subtle)] p-4"
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+    role="dialog"
+    tabindex="-1"
+    aria-modal="true"
+    aria-labelledby="provider-edit-title"
+    onclick={(e) => {
+      if (e.target === e.currentTarget && !busy) cancelEdit();
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape' && !busy) cancelEdit();
+    }}
   >
-    <h2 class="mb-3 text-[14px] font-semibold">
-      {isNew ? '新增 provider' : `编辑 ${editing?.name}`}
-    </h2>
+    <div
+      class="flex max-h-[min(880px,calc(100vh-2rem))] w-full max-w-3xl flex-col overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border-strong)] bg-[var(--color-bg)] shadow-lg"
+    >
+      <div class="border-b border-[var(--color-border)] px-5 py-4">
+        <h2 id="provider-edit-title" class="text-[15px] font-semibold text-[var(--color-text)]">
+          {isNew ? '新增 provider' : `编辑 ${editing?.name}`}
+        </h2>
+        <p class="mt-1 text-[12px] text-[var(--color-text-muted)]">
+          {isNew
+            ? '填写后保存到 provider 池。要用在哪些 agent 上，保存后再点「分配」。'
+            : '改的是池里这一条。已有的分配不会在这里被清掉。'}
+        </p>
+      </div>
 
-    <div class="grid grid-cols-2 gap-3">
+      <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        <div class="grid grid-cols-2 gap-3">
       <label class="block">
-        <span class="mb-1 block text-[11px] text-[var(--color-text-muted)]">标识 id</span>
+        <span class="field-label">标识 id</span>
         <input
-          class="w-full rounded-[var(--radius-md)] border border-[var(--color-border-strong)] bg-[var(--color-bg)] px-2.5 py-1.5 font-[var(--font-mono)] text-[12px] disabled:opacity-60"
+          class="field-control w-full font-[var(--font-mono)]"
           bind:value={form.id}
           placeholder="command"
           disabled={!isNew}
@@ -500,107 +847,119 @@
       </label>
 
       <label class="block">
-        <span class="mb-1 block text-[11px] text-[var(--color-text-muted)]">展示名</span>
-        <input
-          class="w-full rounded-[var(--radius-md)] border border-[var(--color-border-strong)] bg-[var(--color-bg)] px-2.5 py-1.5 text-[13px]"
-          bind:value={form.name}
-          placeholder="CommandCode"
-        />
+        <span class="field-label">展示名</span>
+        <input class="field-control w-full" bind:value={form.name} placeholder="CommandCode" />
       </label>
 
       <label class="col-span-2 block">
-        <span class="mb-1 block text-[11px] text-[var(--color-text-muted)]">API 端点 base_url</span>
+        <span class="field-label">API 端点 base_url</span>
         <input
-          class="w-full rounded-[var(--radius-md)] border border-[var(--color-border-strong)] bg-[var(--color-bg)] px-2.5 py-1.5 font-[var(--font-mono)] text-[12px]"
+          class="field-control w-full font-[var(--font-mono)]"
           bind:value={form.baseUrl}
           placeholder="https://api.example.com/v1"
         />
       </label>
 
-      <label class="block">
-        <span class="mb-1 block text-[11px] text-[var(--color-text-muted)]">
+      <label class="col-span-2 block">
+        <span class="field-label">
           默认协议
           <span class="text-[var(--color-text-faint)]">（未单独指定的 agent 用它）</span>
         </span>
-        <select
-          class="w-full rounded-[var(--radius-md)] border border-[var(--color-border-strong)] bg-[var(--color-bg)] px-2.5 py-1.5 text-[13px]"
-          bind:value={form.kind}
-        >
+        <select class="field-control w-full" bind:value={form.kind}>
           {#each KIND_OPTIONS as k (k.value)}
             <option value={k.value}>{k.label}</option>
           {/each}
         </select>
       </label>
 
-      <!-- 按 agent 覆盖协议。
-           这里列**所有支持 provider 的 agent**，不只是已分配的那些 ——
-           新增 provider 时还没分配，但也应该能预设某个 agent 用别的协议。 -->
+      <!-- 按 agent 覆盖协议。默认折叠，避免编辑区一上来就被长列表占满。 -->
       {#if matrix && matrix.columns.length > 0}
-        <div class="col-span-2">
-          <span class="mb-1.5 block text-[11px] text-[var(--color-text-muted)]">
-            各 agent 实际用的协议
-            <span class="text-[var(--color-text-faint)]">
-              （同一个端点在不同 agent 里可以不同，留默认值就不单独存）
+        <div class="col-span-2 rounded-[var(--radius-md)] border border-[var(--color-border)]">
+          <button
+            type="button"
+            class="flex w-full items-center gap-2 px-3 py-2.5 text-left hover:bg-[var(--color-bg-hover)]"
+            aria-expanded={showAgentKinds}
+            onclick={() => (showAgentKinds = !showAgentKinds)}
+          >
+            <span class="text-[13px] text-[var(--color-text-faint)]">{showAgentKinds ? '▾' : '▸'}</span>
+            <span class="min-w-0 flex-1">
+              <span class="block text-[13px] font-medium text-[var(--color-text)]">
+                各 agent 实际用的协议
+              </span>
+              <span class="block text-[12px] text-[var(--color-text-faint)]">
+                {#if overrideCount() > 0}
+                  已为 {overrideCount()} 个 agent 单独指定协议
+                {:else}
+                  默认折叠。同一端点在不同 agent 可不同，留默认就不单独存
+                {/if}
+              </span>
             </span>
-          </span>
-          <div class="flex flex-col gap-1.5">
-            {#each matrix.columns as col (col.agent)}
-              {@const assigned = editing ? editing.agents.includes(col.agent) : false}
-              {@const overridden = hasOverride(col.agent)}
-              {@const options = kindsForAgent(col.agent)}
-              <div class="flex items-center gap-2 {assigned ? '' : 'opacity-50'}">
-                <span class="w-[110px] shrink-0 truncate text-[11px]" title={col.label}>
-                  {col.label}
-                </span>
-                {#if options.length === 1}
-                  <!-- 只支持一种协议：显示成文字，不给下拉，避免看着像能选 -->
-                  <span
-                    class="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-1.5 py-1 text-[11px] text-[var(--color-text-faint)]"
-                    title="这个 agent 只支持这一种协议"
-                  >
-                    {options[0].label}
-                  </span>
-                {:else}
-                  <select
-                    class="min-w-0 flex-1 rounded border border-[var(--color-border-strong)] bg-[var(--color-bg)] px-1.5 py-1 text-[11px]"
-                    value={kindForAgent(col.agent)}
-                    onchange={(e) => setKindForAgent(col.agent, e.currentTarget.value)}
-                  >
-                    {#each options as k (k.value)}
-                      <option value={k.value}>{k.label}</option>
-                    {/each}
-                  </select>
-                {/if}
-                {#if overridden && options.length > 1}
-                  <button
-                    class="w-[52px] shrink-0 text-[10px] text-[var(--color-text-faint)] underline-offset-2 hover:text-[var(--color-accent)] hover:underline"
-                    onclick={() => delete form.agentKinds[col.agent]}
-                  >
-                    恢复默认
-                  </button>
-                {:else}
-                  <span class="w-[52px] shrink-0 text-[10px] text-[var(--color-text-faint)]">
-                    {options.length === 1 ? '固定' : '默认'}
-                  </span>
-                {/if}
+          </button>
+
+          {#if showAgentKinds}
+            <div class="border-t border-[var(--color-border)] px-3 py-2.5">
+              <div class="flex flex-col gap-2">
+                {#each matrix.columns as col (col.agent)}
+                  {@const assigned = editing ? editing.agents.includes(col.agent) : false}
+                  {@const overridden = hasOverride(col.agent)}
+                  {@const options = kindsForAgent(col.agent)}
+                  <div class="flex items-center gap-2 {assigned ? '' : 'opacity-50'}">
+                    <span
+                      class="w-[120px] shrink-0 truncate text-[13px] text-[var(--color-text)]"
+                      title={col.label}
+                    >
+                      {col.label}
+                    </span>
+                    {#if options.length === 1}
+                      <span
+                        class="field-control flex min-w-0 flex-1 items-center text-[var(--color-text-faint)]"
+                        title="这个 agent 只支持这一种协议"
+                      >
+                        {options[0].label}
+                      </span>
+                    {:else}
+                      <select
+                        class="field-control min-w-0 flex-1"
+                        value={kindForAgent(col.agent)}
+                        onchange={(e) => setKindForAgent(col.agent, e.currentTarget.value)}
+                      >
+                        {#each options as k (k.value)}
+                          <option value={k.value}>{k.label}</option>
+                        {/each}
+                      </select>
+                    {/if}
+                    {#if overridden && options.length > 1}
+                      <button
+                        class="w-[56px] shrink-0 text-[12px] text-[var(--color-text-faint)] underline-offset-2 hover:text-[var(--color-accent)] hover:underline"
+                        onclick={() => delete form.agentKinds[col.agent]}
+                      >
+                        恢复默认
+                      </button>
+                    {:else}
+                      <span class="w-[56px] shrink-0 text-[12px] text-[var(--color-text-faint)]">
+                        {options.length === 1 ? '固定' : '默认'}
+                      </span>
+                    {/if}
+                  </div>
+                {/each}
               </div>
-            {/each}
-          </div>
-          <div class="mt-1 text-[10px] text-[var(--color-text-faint)]">
-            灰色的 agent 当前没分配这个 provider。协议可以预先设好，分配后生效。
-          </div>
+              <div class="mt-2 text-[12px] text-[var(--color-text-faint)]">
+                灰色的 agent 当前没分配这个 provider。协议可以预先设好，分配后生效。
+              </div>
+            </div>
+          {/if}
         </div>
       {/if}
 
-      <label class="block">
-        <span class="mb-1 block text-[11px] text-[var(--color-text-muted)]">
+      <label class="col-span-2 block">
+        <span class="field-label">
           API key
           {#if editing}
             <span class="text-[var(--color-text-faint)]">（留空表示不修改）</span>
           {/if}
         </span>
         <input
-          class="w-full rounded-[var(--radius-md)] border border-[var(--color-border-strong)] bg-[var(--color-bg)] px-2.5 py-1.5 font-[var(--font-mono)] text-[12px]"
+          class="field-control w-full font-[var(--font-mono)]"
           type="password"
           bind:value={form.apiKey}
           placeholder={editing ? `当前 ${editing.keyLen} 字符，末尾 ${editing.keyTail}` : 'sk-...'}
@@ -609,12 +968,12 @@
 
       <div class="col-span-2">
         <div class="mb-1.5 flex items-center gap-2">
-          <span class="text-[11px] text-[var(--color-text-muted)]">
+          <span class="text-[13px] font-medium text-[var(--color-text)]">
             模型（{form.models.length}）
           </span>
           <span class="flex-1"></span>
           <button
-            class="text-[11px] text-[var(--color-text-muted)] underline-offset-2 hover:text-[var(--color-accent)] hover:underline"
+            class="text-[13px] text-[var(--color-text-muted)] underline-offset-2 hover:text-[var(--color-accent)] hover:underline"
             onclick={() => form.models.push(blankModel())}
           >
             + 添加模型
@@ -628,136 +987,170 @@
             还没加模型。注入时会给一个占位模型，实际用不了，建议至少填一个。
           </div>
         {:else}
-          <div class="flex flex-col gap-1.5">
+          <div class="flex flex-col gap-2">
             {#each form.models as m, i (i)}
               {@const key = `${form.id}:${m.id}:${i}`}
               {@const open = openModel === key}
               <div class="overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-border)]">
                 <!-- 折叠态：id + 能力摘要 -->
-                <div class="flex items-center gap-2 px-2.5 py-1.5">
+                <div class="flex items-center gap-2 px-3 py-2">
                   <button
-                    class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--color-text-faint)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]"
+                    class="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-[13px] text-[var(--color-text-faint)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]"
                     aria-label={open ? '收起模型元数据' : '展开模型元数据'}
-                    onclick={() => (openModel = open ? null : key)}
+                    onclick={() => openModelEditor(key)}
                   >
                     {#if open}▾{:else}▸{/if}
                   </button>
                   <input
-                    class="w-[220px] shrink-0 rounded border border-[var(--color-border-strong)] bg-[var(--color-bg)] px-1.5 py-0.5 font-[var(--font-mono)] text-[11px]"
+                    class="field-control w-[240px] shrink-0 font-[var(--font-mono)]"
                     bind:value={m.id}
                     placeholder="model-id"
                   />
-                  <span class="min-w-0 flex-1 truncate text-[11px] text-[var(--color-text-faint)]">
+                  <span class="min-w-0 flex-1 truncate text-[12px] text-[var(--color-text-faint)]">
                     {modelSummary(m)}
                   </span>
                   <button
-                    class="shrink-0 rounded p-1 text-[var(--color-text-faint)] hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
+                    class="shrink-0 rounded-[var(--radius-sm)] p-1.5 text-[var(--color-text-faint)] hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
                     title="移除这个模型"
                     aria-label={`移除模型 ${m.id || i}`}
                     onclick={() => form.models.splice(i, 1)}
                   >
-                    <Trash2 size={12} />
+                    <Trash2 size={14} />
                   </button>
                 </div>
 
-                <!-- 展开态：元数据表单 -->
+                <!-- 展开态：基础字段常显，高级配置默认折叠（对齐 zcode） -->
                 {#if open}
-                  <div class="border-t border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-3 py-2.5">
-                    <div class="grid grid-cols-2 gap-2">
+                  <div class="border-t border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-3">
+                    <div class="flex flex-col gap-3">
                       <label class="block">
-                        <span class="mb-0.5 block text-[10px] text-[var(--color-text-muted)]">
-                          展示名
-                        </span>
+                        <span class="field-label">展示名</span>
                         <input
-                          class="w-full rounded border border-[var(--color-border-strong)] bg-[var(--color-bg)] px-1.5 py-1 text-[11px]"
+                          class="field-control w-full"
                           bind:value={m.name}
                           placeholder="留空用 id"
                         />
                       </label>
-                      <label class="block">
-                        <span class="mb-0.5 block text-[10px] text-[var(--color-text-muted)]">
-                          默认推理档位
-                        </span>
-                        <input
-                          class="w-full rounded border border-[var(--color-border-strong)] bg-[var(--color-bg)] px-1.5 py-1 text-[11px]"
-                          bind:value={m.defaultEffort}
-                          placeholder="如 high"
-                        />
-                      </label>
-                      <label class="block">
-                        <span class="mb-0.5 block text-[10px] text-[var(--color-text-muted)]">
-                          上下文窗口
-                        </span>
-                        <input
-                          class="w-full rounded border border-[var(--color-border-strong)] bg-[var(--color-bg)] px-1.5 py-1 font-[var(--font-mono)] text-[11px]"
-                          type="number"
-                          bind:value={m.contextWindow}
-                          placeholder="留空沿用现有值"
-                        />
-                      </label>
-                      <label class="block">
-                        <span class="mb-0.5 block text-[10px] text-[var(--color-text-muted)]">
-                          输出上限
-                        </span>
-                        <input
-                          class="w-full rounded border border-[var(--color-border-strong)] bg-[var(--color-bg)] px-1.5 py-1 font-[var(--font-mono)] text-[11px]"
-                          type="number"
-                          bind:value={m.maxOutputTokens}
-                          placeholder="留空沿用现有值"
-                        />
-                      </label>
-                    </div>
 
-                    <!-- 输入模态 -->
-                    <div class="mt-2">
-                      <span class="mb-1 block text-[10px] text-[var(--color-text-muted)]">
-                        输入模态
-                      </span>
-                      <div class="flex flex-wrap gap-1">
-                        {#each ['text', 'image', 'video', 'pdf'] as mod (mod)}
-                          {@const on = m.inputModalities.includes(mod)}
-                          <button
-                            class="rounded-full px-2 py-0.5 text-[10px] transition-colors {on
-                              ? 'bg-[var(--color-accent)] text-white'
-                              : 'bg-[var(--color-bg-muted)] text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)]'}"
-                            aria-pressed={on}
-                            onclick={() => toggleModality(m, 'inputModalities', mod)}
-                          >
-                            {mod}
-                          </button>
-                        {/each}
+                      <div class="grid grid-cols-2 gap-3">
+                        <label class="block">
+                          <span class="field-label">上下文窗口</span>
+                          <div class="relative">
+                            <input
+                              class="field-control w-full pr-16 font-[var(--font-mono)]"
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={tokensToK(m.contextWindow)}
+                              placeholder="例如 1000"
+                              oninput={(e) => (m.contextWindow = kToTokens(e.currentTarget.value))}
+                            />
+                            <span
+                              class="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-[12px] text-[var(--color-text-faint)]"
+                            >
+                              k token
+                            </span>
+                          </div>
+                        </label>
+                        <label class="block">
+                          <span class="field-label">最大输出 Token</span>
+                          <div class="relative">
+                            <input
+                              class="field-control w-full pr-16 font-[var(--font-mono)]"
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={tokensToK(m.maxOutputTokens)}
+                              placeholder="例如 128"
+                              oninput={(e) => (m.maxOutputTokens = kToTokens(e.currentTarget.value))}
+                            />
+                            <span
+                              class="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-[12px] text-[var(--color-text-faint)]"
+                            >
+                              k token
+                            </span>
+                          </div>
+                        </label>
                       </div>
-                    </div>
 
-                    <!-- 推理 -->
-                    <div class="mt-2 flex flex-wrap items-center gap-3">
-                      <label class="flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
-                        <input
-                          type="checkbox"
-                          class="accent-[var(--color-accent)]"
-                          bind:checked={m.reasoning}
-                        />
-                        支持推理
-                      </label>
-                      <div class="flex flex-wrap items-center gap-1">
-                        <span class="text-[10px] text-[var(--color-text-muted)]">档位</span>
-                        {#each ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as lv (lv)}
-                          {@const on = m.reasoningEfforts.includes(lv)}
-                          <button
-                            class="rounded-full px-2 py-0.5 text-[10px] transition-colors {on
-                              ? 'bg-[var(--color-accent)] text-white'
-                              : 'bg-[var(--color-bg-muted)] text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)]'}"
-                            aria-pressed={on}
-                            onclick={() => toggleEffort(m, lv)}
-                          >
-                            {lv}
-                          </button>
-                        {/each}
+                      <div class="rounded-[var(--radius-md)] border border-[var(--color-border)]">
+                        <button
+                          type="button"
+                          class="flex w-full items-center gap-2 px-3 py-2.5 text-left hover:bg-[var(--color-bg-hover)]"
+                          aria-expanded={showModelAdvanced}
+                          onclick={() => (showModelAdvanced = !showModelAdvanced)}
+                        >
+                          <span class="text-[13px] text-[var(--color-text-faint)]">
+                            {showModelAdvanced ? '▾' : '▸'}
+                          </span>
+                          <span class="text-[13px] font-medium text-[var(--color-text)]">高级配置</span>
+                        </button>
+
+                        {#if showModelAdvanced}
+                          <div class="space-y-3 border-t border-[var(--color-border)] px-3 py-3">
+                            <div>
+                              <span class="field-label">输入类型</span>
+                              <div class="flex flex-wrap gap-1.5">
+                                {#each MODALITY_OPTIONS as mod (mod.value)}
+                                  {@const on = m.inputModalities.includes(mod.value)}
+                                  <button
+                                    type="button"
+                                    class="rounded-[var(--radius-sm)] border px-2.5 py-1.5 text-[12px] transition-colors {on
+                                      ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white'
+                                      : 'border-[var(--color-border-strong)] bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)]'}"
+                                    aria-pressed={on}
+                                    onclick={() => toggleModality(m, 'inputModalities', mod.value)}
+                                  >
+                                    {mod.label}
+                                  </button>
+                                {/each}
+                              </div>
+                            </div>
+
+                            <div>
+                              <span class="field-label">推理等级（从低到高）</span>
+                              <div class="mb-2 flex items-center gap-2">
+                                <label class="flex items-center gap-1.5 text-[13px] text-[var(--color-text)]">
+                                  <input
+                                    type="checkbox"
+                                    class="size-3.5 accent-[var(--color-accent)]"
+                                    bind:checked={m.reasoning}
+                                  />
+                                  支持推理
+                                </label>
+                              </div>
+                              <div class="flex flex-wrap gap-1.5">
+                                {#each EFFORT_OPTIONS as lv (lv)}
+                                  {@const on = m.reasoningEfforts.includes(lv)}
+                                  <button
+                                    type="button"
+                                    class="rounded-[var(--radius-sm)] border px-2.5 py-1.5 font-[var(--font-mono)] text-[12px] transition-colors {on
+                                      ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white'
+                                      : 'border-[var(--color-border-strong)] bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)]'}"
+                                    aria-pressed={on}
+                                    onclick={() => toggleEffort(m, lv)}
+                                  >
+                                    {lv}
+                                  </button>
+                                {/each}
+                              </div>
+                            </div>
+
+                            <label class="block">
+                              <span class="field-label">默认推理档位</span>
+                              <input
+                                class="field-control w-full"
+                                bind:value={m.defaultEffort}
+                                placeholder="如 high / max"
+                              />
+                            </label>
+                          </div>
+                        {/if}
                       </div>
-                    </div>
 
-                    <div class="mt-2 text-[10px] text-[var(--color-text-faint)]">
-                      留空的字段表示「不指定」，注入时沿用该 agent 配置里的现有值或内置默认。
+                      <div class="text-[12px] text-[var(--color-text-faint)]">
+                        上下文与输出按 k token 填写（1000 = 100 万 token）。留空表示不指定，注入时沿用现有值。
+                      </div>
                     </div>
                   </div>
                 {/if}
@@ -768,20 +1161,22 @@
       </div>
 
       <label class="col-span-2 block">
-        <span class="mb-1 block text-[11px] text-[var(--color-text-muted)]">备注</span>
+        <span class="field-label">备注</span>
         <input
-          class="w-full rounded-[var(--radius-md)] border border-[var(--color-border-strong)] bg-[var(--color-bg)] px-2.5 py-1.5 text-[12px]"
+          class="field-control w-full"
           bind:value={form.note}
           placeholder="2026-11-10 从控制台获取"
         />
       </label>
-    </div>
+        </div>
+      </div>
 
-    <div class="mt-3 flex gap-2">
-      <Button variant="primary" onclick={submit} disabled={busy}>
-        {busy ? '保存中…' : '保存'}
-      </Button>
-      <Button variant="ghost" onclick={cancelEdit} disabled={busy}>取消</Button>
+      <div class="flex justify-end gap-2 border-t border-[var(--color-border)] px-5 py-3">
+        <Button variant="ghost" onclick={cancelEdit} disabled={busy}>取消</Button>
+        <Button variant="primary" onclick={submit} disabled={busy}>
+          {busy ? '保存中…' : '保存'}
+        </Button>
+      </div>
     </div>
   </div>
 {/if}
@@ -822,27 +1217,8 @@
 {:else}
   <div class="flex flex-col gap-2">
     {#each matrix.providers as row (row.id)}
-      {@const isOpen = expanded === row.id}
-      <div
-        class="overflow-hidden rounded-[var(--radius-lg)] border transition-colors {isOpen
-          ? 'border-[var(--color-accent)]'
-          : 'border-[var(--color-border)]'}"
-      >
-        <!-- 行主体 -->
+      <div class="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)]">
         <div class="flex items-center gap-3 px-4 py-3">
-          <!-- 展开箭头 -->
-          <button
-            class="flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-[var(--color-text-faint)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]"
-            aria-label={isOpen ? '收起分配' : '展开分配'}
-            onclick={() => (expanded = isOpen ? null : row.id)}
-          >
-            {#if isOpen}
-              <ChevronDown size={14} />
-            {:else}
-              <ChevronRight size={14} />
-            {/if}
-          </button>
-
           <!-- 类型图标 -->
           <div
             class="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-bg-muted)]"
@@ -850,21 +1226,13 @@
             <KeyRound size={15} class="text-[var(--color-text-muted)]" />
           </div>
 
-          <!-- 主体 -->
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2">
+          <div class="min-w-0 flex-1 overflow-hidden">
+            <div class="flex flex-wrap items-center gap-2">
               <span class="font-[var(--font-mono)] text-[13px] font-medium">{row.id}</span>
-              <Badge tone={row.kind === 'anthropic' ? 'info' : 'plain'}>{row.kindLabel}</Badge>
-              {#if Object.keys(row.agentKinds).length > 0}
-                <span
-                  class="rounded-full bg-[var(--color-warn-bg)] px-2 py-0.5 text-[10px] text-[var(--color-warn)]"
-                  title={Object.entries(row.agentKinds)
-                    .map(([a, k]) => `${labelOf(a)} → ${kindLabelOf(k)}`)
-                    .join('\n')}
-                >
-                  {Object.keys(row.agentKinds).length} 个 agent 用别的协议
-                </span>
+              {#if row.name && row.name !== row.id}
+                <span class="text-[13px] text-[var(--color-text-muted)]">{row.name}</span>
               {/if}
+              <Badge tone={row.kind === 'anthropic' ? 'info' : 'plain'}>{row.kindLabel}</Badge>
               {#if row.keyLen === 0}
                 <Badge tone="warn">无 key</Badge>
               {/if}
@@ -875,63 +1243,15 @@
             >
               {row.baseUrl}
             </div>
-            <!-- 模型列表：折叠态也要看得到，否则不知道这个 provider 有哪些模型 -->
-            <div class="mt-0.5 flex flex-wrap items-center gap-1">
-              {#if row.models.length === 0}
-                <span class="text-[10px] text-[var(--color-text-faint)]">没有模型</span>
-              {:else}
-                {#each row.models.slice(0, 4) as m (m.id)}
-                  <span
-                    class="rounded bg-[var(--color-bg-muted)] px-1.5 py-0.5 font-[var(--font-mono)] text-[10px] text-[var(--color-text-muted)]"
-                    title={modelSummary(m)}
-                  >
-                    {m.id}
-                  </span>
-                {/each}
-                {#if row.models.length > 4}
-                  <span
-                    class="text-[10px] text-[var(--color-text-faint)]"
-                    title={row.models
-                      .slice(4)
-                      .map((m) => m.id)
-                      .join('\n')}
-                  >
-                    +{row.models.length - 4}
-                  </span>
-                {/if}
-              {/if}
-            </div>
-          </div>
-
-          <!-- 模型数 -->
-          <div class="hidden shrink-0 text-[11px] text-[var(--color-text-faint)] lg:block">
-            {row.models.length} 个模型
-          </div>
-
-          <!-- 已分配标签。用 label 而不是裸 id，随 agent 实现变化自动跟随 -->
-          <div class="hidden shrink-0 items-center gap-1 md:flex">
-            {#if row.agents.length === 0}
-              <span class="text-[11px] text-[var(--color-text-faint)]">未分配</span>
-            {:else}
-              {#each row.agents as a (a)}
-                <span
-                  class="rounded-full bg-[var(--color-accent)]/10 px-2 py-0.5 text-[10px] text-[var(--color-accent)]"
-                >
-                  {labelOf(a)}
-                </span>
-              {/each}
-            {/if}
           </div>
 
           <!-- 操作 -->
           <div class="flex shrink-0 items-center gap-1">
             <button
-              class="rounded-[var(--radius-sm)] px-2.5 py-1 text-[11px] font-medium transition-colors {isOpen
-                ? 'bg-[var(--color-accent)] text-white'
-                : 'border border-[var(--color-border-strong)] text-[var(--color-text-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]'}"
-              onclick={() => (expanded = isOpen ? null : row.id)}
+              class="rounded-[var(--radius-sm)] border border-[var(--color-border-strong)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+              onclick={() => (assigningId = row.id)}
             >
-              {isOpen ? '收起' : '分配'}
+              分配
             </button>
             <button
               class="rounded p-1 text-[var(--color-text-faint)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]"
@@ -951,72 +1271,6 @@
             </button>
           </div>
         </div>
-
-        <!-- 分配面板 -->
-        {#if isOpen && matrix}
-          <div class="border-t border-[var(--color-border)] bg-[var(--color-bg-subtle)] px-4 py-4">
-            <div class="mb-3 flex items-center gap-2">
-              <span class="text-[12px] font-medium text-[var(--color-text)]">
-                把这个 provider 注入到
-              </span>
-              <span class="flex-1"></span>
-              <button
-                class="text-[11px] text-[var(--color-text-muted)] underline-offset-2 hover:text-[var(--color-accent)] hover:underline"
-                onclick={() => toggleAllAgents(row.id)}
-              >
-                {matrix.columns.filter((c) => c.available).every((c) => row.agents.includes(c.agent))
-                  ? '全不选'
-                  : '全选'}
-              </button>
-            </div>
-
-            <!-- agent 卡片：点整块切换 -->
-            <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
-              {#each matrix.columns as col (col.agent)}
-                {@const on = isAssigned(row.id, col.agent)}
-                <button
-                  class="flex items-center gap-2.5 rounded-[var(--radius-md)] border px-3 py-2.5 text-left transition-all {!col.available
-                    ? 'cursor-not-allowed border-[var(--color-border)] opacity-40'
-                    : on
-                      ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white shadow-sm'
-                      : 'border-[var(--color-border-strong)] bg-[var(--color-bg)] text-[var(--color-text)] hover:border-[var(--color-accent)] hover:bg-[var(--color-bg-hover)]'}"
-                  disabled={!col.available || busy}
-                  title={col.available
-                    ? `切换「${row.id}」在 ${col.label}`
-                    : `${col.label} 不可用：${col.note}`}
-                  aria-pressed={on}
-                  aria-label={`${row.id} 在 ${col.label} ${on ? '已启用' : '未启用'}`}
-                  onclick={() => toggleAgent(row.id, col.agent)}
-                >
-                  <span
-                    class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border transition-colors {on
-                      ? 'border-white/60 bg-white/20'
-                      : 'border-[var(--color-border-strong)]'}"
-                  >
-                    {#if on}
-                      <Check size={11} class="text-white" />
-                    {/if}
-                  </span>
-
-                  <span class="min-w-0 flex-1">
-                    <span class="block truncate text-[12px] font-medium">{col.label}</span>
-                    {#if !col.available}
-                      <span class="block text-[10px] opacity-70">未安装</span>
-                    {:else if on}
-                      <span class="block text-[10px] opacity-80">已启用</span>
-                    {:else}
-                      <span class="block text-[10px] text-[var(--color-text-faint)]">未启用</span>
-                    {/if}
-                  </span>
-                </button>
-              {/each}
-            </div>
-
-            <div class="mt-3 text-[10px] text-[var(--color-text-faint)]">
-              改动已写入母版。点右上角「应用到各 agent」才会真正写进配置文件。
-            </div>
-          </div>
-        {/if}
       </div>
     {/each}
   </div>
@@ -1027,21 +1281,123 @@
   </div>
 {/if}
 
-<!-- 边界说明 -->
-<div class="mt-4 rounded-[var(--radius-lg)] border border-[var(--color-border)] p-3">
-  <div class="text-[11px] leading-relaxed text-[var(--color-text-muted)]">
-    <strong class="text-[var(--color-text)]">单槽位的 agent 只有一个生效。</strong>
-    这类 agent（如 Claude Code）同一时刻只能有一个 provider，勾上它会自动取消其他 provider 上的同一个 agent。
-    <br />
-    <span class="flex items-start gap-1 text-[var(--color-text-faint)]">
-      <TriangleAlert size={11} class="mt-0.5 shrink-0" />
-      应用前请退出正在运行的 agent，它们可能在退出时把内存里的配置写回磁盘，覆盖这次改动。
-    </span>
-  </div>
-</div>
+{/if}
 
 {#if log}
   <div class="mt-4">
     <Log text={log} maxHeight="320px" />
   </div>
 {/if}
+
+{#if claudeMapDialog}
+  {@const dlg = claudeMapDialog}
+  {@const p = matrix?.providers.find((x) => x.id === dlg.providerId)}
+  {@const modelOptions = p?.models.map((m) => m.id).filter(Boolean) ?? []}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+    role="dialog"
+    tabindex="-1"
+    aria-modal="true"
+    aria-labelledby="claude-map-title"
+    onclick={(e) => {
+      if (e.target === e.currentTarget) closeClaudeMapDialog();
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') closeClaudeMapDialog();
+    }}
+  >
+    <div
+      class="w-full max-w-md rounded-[var(--radius-lg)] border border-[var(--color-border-strong)] bg-[var(--color-bg)] p-4 shadow-lg"
+    >
+      <h2 id="claude-map-title" class="text-[14px] font-medium text-[var(--color-text)]">
+        {dlg.mode === 'enable' ? '启用 Claude：选择档位模型' : '编辑 Claude 档位映射'}
+      </h2>
+      <p class="mt-1 text-[12px] text-[var(--color-text-muted)]">
+        为 opus / sonnet / haiku / 默认 指定本 provider 的模型 id，写入母版
+        <code class="text-[11px]">claude_model_map</code>。
+        Claude Code 走 Anthropic <code class="text-[11px]">/messages</code>，请选网关里支持该协议的模型（例如 CommandCode 的
+        <code class="text-[11px]">claude-*</code>）；只开了 chat/completions 的 DeepSeek 等会报 model 不可用。
+      </p>
+
+      {#if modelOptions.length === 0}
+        <p class="mt-3 text-[12px] text-[var(--color-danger)]">
+          这个 provider 还没有模型。请先在编辑里加上模型，再设映射。
+        </p>
+      {:else}
+        <div class="mt-4 grid gap-3">
+          {#each [
+            { key: 'opus' as const, label: 'Opus（ANTHROPIC_DEFAULT_OPUS_MODEL）' },
+            { key: 'sonnet' as const, label: 'Sonnet（ANTHROPIC_DEFAULT_SONNET_MODEL）' },
+            { key: 'haiku' as const, label: 'Haiku（ANTHROPIC_DEFAULT_HAIKU_MODEL）' },
+            { key: 'default' as const, label: '默认（ANTHROPIC_MODEL）' },
+          ] as slot}
+            <label class="block">
+              <span class="field-label">{slot.label}</span>
+              <select
+                class="field-control w-full"
+                value={dlg.map[slot.key]}
+                onchange={(e) => {
+                  if (!claudeMapDialog) return;
+                  claudeMapDialog = {
+                    ...claudeMapDialog,
+                    map: {
+                      ...claudeMapDialog.map,
+                      [slot.key]: (e.currentTarget as HTMLSelectElement).value,
+                    },
+                  };
+                }}
+              >
+                {#each modelOptions as mid}
+                  <option value={mid}>{mid}</option>
+                {/each}
+              </select>
+            </label>
+          {/each}
+        </div>
+      {/if}
+
+      <div class="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" onclick={closeClaudeMapDialog}>取消</Button>
+        <Button
+          variant="primary"
+          disabled={busy || modelOptions.length === 0}
+          onclick={confirmClaudeMap}
+        >
+          {dlg.mode === 'enable' ? '确认启用' : '保存映射'}
+        </Button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<style>
+  /* 表单标签与控件成套：字号 12/13，控件高度统一，避免「字小框大」 */
+  :global(.field-label) {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--color-text-muted);
+  }
+
+  :global(.field-control) {
+    display: block;
+    box-sizing: border-box;
+    height: 36px;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    background: var(--color-bg);
+    padding: 0 10px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--color-text);
+  }
+
+  :global(select.field-control) {
+    padding-right: 28px;
+  }
+
+  :global(.field-control:disabled) {
+    opacity: 0.6;
+  }
+</style>

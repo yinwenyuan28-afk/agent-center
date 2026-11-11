@@ -171,7 +171,25 @@ impl Injector for ClaudeInjector {
             }
         };
 
-        set("ANTHROPIC_BASE_URL", &p.base_url, env, &mut summary, &mut changed);
+        let model_ids = emitted_model_ids(p);
+        let use_bridge = super::claude_bridge::needs_bridge(p.kind_for("claude"), &model_ids);
+        let base_url = if use_bridge {
+            super::claude_bridge::bridge_base_url()
+        } else {
+            p.base_url.clone()
+        };
+        set(
+            "ANTHROPIC_BASE_URL",
+            &base_url,
+            env,
+            &mut summary,
+            &mut changed,
+        );
+        if use_bridge {
+            summary.push(
+                "有模型不走 Anthropic Messages，Claude 改连本地转换".to_string(),
+            );
+        }
 
         // 统一用 AUTH_TOKEN（Bearer 方式）。同时清掉 API_KEY 避免两者并存冲突
         set("ANTHROPIC_AUTH_TOKEN", &p.api_key, env, &mut summary, &mut changed);
@@ -180,9 +198,8 @@ impl Injector for ClaudeInjector {
             summary.push("移除 ANTHROPIC_API_KEY（统一用 AUTH_TOKEN）".to_string());
         }
 
-        // 三个别名按序分配模型：opus ← [0]、sonnet ← [1]、haiku ← [2]。
-        // 模型不足时回落，保证别名不会空着。
-        // 重构前三个别名全指向 models[0]，导致 /model 里三个档位是同一个模型。
+        // 档位映射：优先用母版 `claude_model_map`；缺项或找不到 id 时
+        // 回退到 models[0]/[1]/[2]（及默认 = [0]）。
         if !p.models.is_empty() {
             let pick = |i: usize| -> &crate::providers::model::ModelSpec {
                 if i < p.models.len() {
@@ -191,11 +208,16 @@ impl Injector for ClaudeInjector {
                     p.models.last().unwrap()
                 }
             };
+            let resolve = |want: Option<&String>, fallback: usize| -> &crate::providers::model::ModelSpec {
+                want.and_then(|id| p.find_model(id))
+                    .unwrap_or_else(|| pick(fallback))
+            };
 
+            let map = &p.claude_model_map;
             let slots = [
-                ("ANTHROPIC_DEFAULT_OPUS_MODEL", pick(0)),
-                ("ANTHROPIC_DEFAULT_SONNET_MODEL", pick(1)),
-                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", pick(2)),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL", resolve(map.opus.as_ref(), 0)),
+                ("ANTHROPIC_DEFAULT_SONNET_MODEL", resolve(map.sonnet.as_ref(), 1)),
+                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", resolve(map.haiku.as_ref(), 2)),
             ];
 
             for (var, model) in slots {
@@ -204,8 +226,14 @@ impl Injector for ClaudeInjector {
                 set(&name_var, model.display_name(), env, &mut summary, &mut changed);
             }
 
-            // 顶层 ANTHROPIC_MODEL 指向第一个
-            set("ANTHROPIC_MODEL", &p.models[0].id, env, &mut summary, &mut changed);
+            let default_model = resolve(map.default_model.as_ref(), 0);
+            set(
+                "ANTHROPIC_MODEL",
+                &default_model.id,
+                env,
+                &mut summary,
+                &mut changed,
+            );
         }
 
         if !changed {
@@ -222,7 +250,7 @@ impl Injector for ClaudeInjector {
             orig
         };
 
-        Ok(vec![FilePlan {
+        let mut plans = vec![FilePlan {
             path: contract_tilde(&path),
             agent: "claude".to_string(),
             content,
@@ -230,7 +258,27 @@ impl Injector for ClaudeInjector {
             post_hash: String::new(),
             changed,
             summary,
-        }])
+        }];
+        if use_bridge {
+            let bridge_path = super::claude_bridge::config_path();
+            let bridge_pre = hash_file(&bridge_path)?;
+            let bridge_content = super::claude_bridge::bridge_file_content(
+                &p.base_url,
+                p.kind_for("claude"),
+            );
+            let bridge_changed = std::fs::read_to_string(&bridge_path).ok().as_deref()
+                != Some(bridge_content.as_str());
+            plans.push(FilePlan {
+                path: contract_tilde(&bridge_path),
+                agent: "claude".to_string(),
+                content: bridge_content,
+                pre_hash: bridge_pre,
+                post_hash: String::new(),
+                changed: bridge_changed,
+                summary: vec!["记下转换上游。agentcenter 窗口开着时 Claude 走这里".into()],
+            });
+        }
+        Ok(plans)
     }
 
     fn diff(&self, providers: &[Provider]) -> anyhow::Result<Vec<DiffLine>> {
@@ -270,6 +318,36 @@ impl Injector for ClaudeInjector {
             })
             .collect())
     }
+}
+
+/// 这次会写进 Claude 环境变量的模型 id。空列表表示母版没填模型。
+fn emitted_model_ids(p: &Provider) -> Vec<String> {
+    if p.models.is_empty() {
+        return Vec::new();
+    }
+    let pick = |i: usize| {
+        if i < p.models.len() {
+            &p.models[i]
+        } else {
+            p.models.last().unwrap()
+        }
+    };
+    let resolve = |want: Option<&String>, fallback: usize| -> String {
+        want.and_then(|id| p.find_model(id))
+            .unwrap_or_else(|| pick(fallback))
+            .id
+            .clone()
+    };
+    let map = &p.claude_model_map;
+    let mut ids = vec![
+        resolve(map.opus.as_ref(), 0),
+        resolve(map.sonnet.as_ref(), 1),
+        resolve(map.haiku.as_ref(), 2),
+        resolve(map.default_model.as_ref(), 0),
+    ];
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 /// 归一化 URL 用于比对。忽略协议差异和尾部斜杠。

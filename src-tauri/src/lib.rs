@@ -19,6 +19,8 @@ pub mod types;
 ///
 /// 只有在没有子命令时才走到这里，由 `main.rs` 负责调用。
 pub fn run_gui() {
+    // 窗口活着，Claude 才能把 OpenAI 协议的模型翻成 Messages。
+    providers::claude_bridge::ensure_started();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())

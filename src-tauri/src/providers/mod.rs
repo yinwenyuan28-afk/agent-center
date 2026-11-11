@@ -12,6 +12,7 @@
 
 pub mod backfill;
 pub mod claude;
+pub mod claude_bridge;
 pub mod codex;
 pub mod diff;
 pub mod dsh;
@@ -164,3 +165,7 @@ pub fn sync(providers: &[Provider], dry_run: bool) -> anyhow::Result<model::Sync
 
     Ok(report)
 }
+
+#[cfg(test)]
+mod matrix_ser_test;
+

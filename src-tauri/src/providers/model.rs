@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 // ModelSpec / ModelCost 定义在 types.rs —— 它们是跨进程契约的一部分，
 // 前端要消费，契约检查脚本也只会扫那个文件。这里 re-export 出来，
 // 让 `providers::model::ModelSpec` 依然可用。
-pub use crate::types::{ModelCost, ModelSpec};
+pub use crate::types::{ClaudeModelMap, ModelCost, ModelSpec};
 
 impl ModelSpec {
     /// 只有 id、没有任何元数据。
@@ -221,6 +221,11 @@ pub struct Provider {
     /// 要注入到哪些 agent。未列出的 agent 不会被改动
     #[serde(default)]
     pub agents: Vec<String>,
+    /// Claude Code 的 Opus/Sonnet/Haiku/默认模型映射。
+    ///
+    /// 只在分配了 claude 时有意义。全空则注入器按 models 下标回退。
+    #[serde(default, skip_serializing_if = "ClaudeModelMap::is_empty")]
+    pub claude_model_map: ClaudeModelMap,
     /// 备注，自由文本。用于记录 key 是哪天从哪拿的
     #[serde(default)]
     pub note: String,
@@ -328,6 +333,11 @@ impl Provider {
     /// 是否给某个 agent 单独指定过协议。
     pub fn has_agent_kind(&self, agent: &str) -> bool {
         self.agent_kinds.contains_key(agent)
+    }
+
+    /// 按 id 找模型。找不到返回 None。
+    pub fn find_model(&self, id: &str) -> Option<&ModelSpec> {
+        self.models.iter().find(|m| m.id == id)
     }
 }
 
