@@ -81,8 +81,8 @@ check('Pi 用默认的 anthropic-messages', pi1.providers?.p1?.api === 'anthropi
 
 const hermesYaml1 = readFileSync(join(TEST, 'hermes/config.yaml'), 'utf8');
 check(
-  'Hermes 用默认的 chat_completions',
-  /api_mode: chat_completions/.test(hermesYaml1),
+  'Hermes 用默认的 anthropic_messages',
+  /api_mode: anthropic_messages/.test(hermesYaml1),
   hermesYaml1.split('\n').filter((l) => l.includes('api_mode')).join(' | '),
 );
 
@@ -105,8 +105,8 @@ check('ZCode 仍是默认 anthropic', zcEntry2?.kind === 'anthropic', zcEntry2?.
 
 const hermesYaml2 = readFileSync(join(TEST, 'hermes/config.yaml'), 'utf8');
 check(
-  'Hermes 仍是默认 chat_completions',
-  /api_mode: chat_completions/.test(hermesYaml2),
+  'Hermes 仍是默认 anthropic_messages',
+  /api_mode: anthropic_messages/.test(hermesYaml2),
 );
 
 // ---------------------------------------------------------------- 3. 改 ZCode 的协议
@@ -140,8 +140,8 @@ check(
 run(['providers', 'sync']);
 const hermesYaml4 = readFileSync(join(TEST, 'hermes/config.yaml'), 'utf8');
 check(
-  'Hermes 变成 responses',
-  /api_mode: responses/.test(hermesYaml4),
+  'Hermes 变成 codex_responses',
+  /api_mode: codex_responses/.test(hermesYaml4),
   hermesYaml4.split('\n').filter((l) => l.includes('api_mode')).join(' | '),
 );
 

@@ -70,17 +70,23 @@ const out = run(['providers', 'sync']);
 console.log('  [sync]', out.trim().split('\n').slice(0, 4).join(' / '));
 
 const yaml = read('hermes/config.yaml');
-check('provider 写进了 config.yaml', /testprov:/.test(yaml));
+// 新形态：custom_providers 是列表，按 name 匹配
+check('provider 写进了 custom_providers 列表', /- name: testprov/.test(yaml));
 check('base_url 正确', /base_url: https:\/\/test\.example\.com\/v1/.test(yaml));
 check('api_mode 是 chat_completions', /api_mode: chat_completions/.test(yaml));
 check('模型写进了 models', /test-model:/.test(yaml));
 check('context_length 正确', /context_length: 128000/.test(yaml));
 check('原有注释保留', /# ── Security ──/.test(yaml));
 check('原有 skills.disabled 保留', /skills:/.test(yaml) && /disabled:/.test(yaml));
+
+// v12 的 providers: 字典归 Hermes 自己管，注入器必须一个字节都不改
+const providersDictBefore = read('hermes/config.yaml').match(
+  /^providers:\n(?:[ \t].*\n)*/m,
+)?.[0];
 check(
-  '原有 opencode-go provider 保留',
-  /opencode-go:/.test(yaml),
-  '这是文件里原有的',
+  'providers: 字典原样保留（v12 只读）',
+  providersDictBefore !== undefined && /provider/.test(providersDictBefore),
+  providersDictBefore ? providersDictBefore.split('\n').slice(0, 3).join(' / ') : '找不到 providers 段',
 );
 
 // ---------------------------------------------------------------- Hermes MCP
