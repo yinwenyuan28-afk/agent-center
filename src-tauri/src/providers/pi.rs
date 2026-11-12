@@ -1,18 +1,42 @@
 //! Pi 的 provider 注入器。
 //!
-//! Pi 的 provider 定义分散在三个文件里，这里只改其中两个：
+//! Pi 的 provider 定义在 `~/.pi/agent/models.json` 的
+//! `providers.<id>`。**密钥也写在这里的 `apiKey` 字段**：
 //!
-//! - `~/.pi/agent/auth.json`    —— 存 key，结构 `{ "<id>": { "type": "api_key", "key": "..." } }`
-//! - `~/.pi/agent/models.json`  —— 存 provider 定义与模型列表
+//! ```jsonc
+//! {
+//!   "providers": {
+//!     "<id>": {
+//!       "name": "显示名",
+//!       "baseUrl": "https://...",
+//!       "api": "openai-completions",
+//!       "apiKey": "sk-xxx",
+//!       "models": [ ... ]
+//!     }
+//!   }
+//! }
+//! ```
 //!
-//! `settings.json` 的 `defaultProvider` / `defaultModel` **不改** ——
-//! 那是用户当前在用的选择，替用户切 provider 是越权。
+//! ## 和早期实现的差别：不再写 auth.json
 //!
-//! ## 两个文件的改动要一起成功
+//! 早期版本把 key 写进 `auth.json` 的 `<id>.key`。核对 cc-switch 后
+//! 修正：`auth.json` 是 Pi 的 `/login` 凭据文件，Pi 文档明确它归
+//! `/login` 自己管。cc-switch 对 Pi **只读写 models.json，完全不碰
+//! auth.json**。两处都写会让 Pi 不知道该用哪一个，而且覆盖用户用
+//! `/login` 登录的账号。
 //!
-//! 如果只写了 auth.json 没写 models.json，provider 有 key 但没定义，
-//! Pi 启动时找不到模型。所以这两个文件在同一个 `plan` 里返回，
-//! 由上层统一做"全部成功或全部不写"的保证。
+//! 现在和 cc-switch 一致：key 内联在 `providers.<id>.apiKey`。
+//!
+//! ## `apiKey` 的表达式
+//!
+//! Pi 支持 `$ENV` / `${ENV}`（从环境变量取）和 `!command`（执行命令）。
+//! 本工具只写明文 key，但**读回时不解析表达式** —— 遇到 `$` 或 `!`
+//! 开头的值一律当"用户自己配的"，不覆盖。
+//!
+//! ## `settings.json` 不改
+//!
+//! `defaultProvider` / `defaultModel` 是用户当前在用的选择，替用户切
+//! provider 是越权。cc-switch 也只读不写。
 
 use super::model::{DiffAction, DiffLine, FilePlan, ModelSpec, Provider, ProviderKind};
 use super::safe_write::hash_file;
@@ -26,10 +50,6 @@ pub struct PiInjector;
 impl PiInjector {
     fn dir() -> PathBuf {
         super::store::home_dir().join(".pi").join("agent")
-    }
-
-    fn auth_path() -> PathBuf {
-        Self::dir().join("auth.json")
     }
 
     fn models_path() -> PathBuf {
@@ -49,12 +69,39 @@ fn pi_api(kind: ProviderKind) -> &'static str {
     }
 }
 
+/// 把母版的输入模态收敛成 Pi 认识的两种：`text` 和 `image`。
+///
+/// **这不是可选的**。Pi 的 `models.json` 用 typebox 校验整份文件，模型条目的
+/// `input` 只允许这两个字面量：
+///
+/// ```js
+/// input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")])))
+/// ```
+///
+/// 一旦出现 `video` / `pdf`，**整份 `models.json` 校验失败**，Pi 返回一个空的
+/// provider 表（`dist/core/model-config.js` 的 `validateModelsConfig.Check`
+/// 失败分支）。后果是用户所有自定义 provider 一起消失，只剩 Pi 内置的那几家
+/// —— 看起来像「启用的不见了、关了的还在」，实际是整份配置被丢弃。
+///
+/// 所以这里必须主动剔除 Pi 不认识的模态，而不是原样透传。
+/// 若一个都不剩（比如只有 `pdf`），退回 `["text"]` —— 空数组虽然合法，
+/// 但 Pi 会把它当成不支持任何输入。
+fn pi_input_modalities(spec: &ModelSpec) -> Vec<String> {
+    let kept = spec.input_within(&["text", "image"]);
+    if kept.is_empty() {
+        vec!["text".to_string()]
+    } else {
+        kept
+    }
+}
+
 /// 构造 Pi 的 provider 定义（models.json 里的那一条）。
 fn to_pi_provider(p: &Provider) -> Value {
     let mut obj = Map::new();
     obj.insert("name".into(), Value::String(p.name.clone()));
     obj.insert("baseUrl".into(), Value::String(p.base_url.clone()));
     obj.insert("api".into(), Value::String(pi_api(p.kind_for("pi")).to_string()));
+    obj.insert("apiKey".into(), Value::String(p.api_key.clone()));
 
     // models 数组。母版给的是模型规格，填的字段用它，没填的走默认。
     let mut arr = Vec::new();
@@ -91,7 +138,7 @@ fn make_pi_model(spec: &ModelSpec) -> Value {
     m.insert(
         "input".into(),
         Value::Array(
-            spec.input_or_default()
+            pi_input_modalities(spec)
                 .into_iter()
                 .map(Value::String)
                 .collect(),
@@ -194,10 +241,11 @@ fn merge_pi_models(provider: &mut Value, specs: &[ModelSpec]) -> bool {
                     }
                 }
                 if !spec.input_modalities.is_empty() {
-                    let want: Vec<Value> = spec
-                        .input_modalities
-                        .iter()
-                        .map(|s| Value::String(s.clone()))
+                    // 必须走收敛函数：直接把母版的 video / pdf 写进来会让
+                    // 整份 models.json 校验失败，Pi 丢弃所有自定义 provider。
+                    let want: Vec<Value> = pi_input_modalities(spec)
+                        .into_iter()
+                        .map(Value::String)
                         .collect();
                     if m.get("input").and_then(|v| v.as_array()) != Some(&want) {
                         m.insert("input".into(), Value::Array(want));
@@ -243,15 +291,19 @@ impl Injector for PiInjector {
     }
 
     fn targets(&self) -> Vec<PathBuf> {
-        vec![Self::auth_path(), Self::models_path()]
+        vec![Self::models_path()]
     }
 
     fn plan(&self, providers: &[Provider]) -> anyhow::Result<Vec<FilePlan>> {
-        let auth_path = Self::auth_path();
         let models_path = Self::models_path();
 
         // Pi 没装就跳过
-        if !auth_path.exists() && !models_path.exists() {
+        if !models_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        // 母版为空时不做任何事，避免把空母版理解成"清空"
+        if providers.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -260,109 +312,13 @@ impl Injector for PiInjector {
             .filter(|p| p.agents.iter().any(|a| a == "pi"))
             .collect();
 
-        // 母版为空时不做任何事，避免把空母版理解成"清空"
-        if providers.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // 取消分配的：从 auth.json 和 models.json 里都摘掉
-
-        // 母版是空的就什么都不做（空母版不等于"清空"）
-        if providers.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // 取消分配的 provider：从 auth.json 和 models.json 里都摘掉
+        // 取消分配的 provider：从 models.json 里摘掉定义（key 也在里面）
         let unassigned: Vec<&Provider> = providers
             .iter()
             .filter(|p| !p.agents.iter().any(|a| a == "pi"))
             .collect();
 
-        let mut plans = Vec::new();
-
-        // ---- auth.json ----
-        let auth_orig = if auth_path.exists() {
-            std::fs::read_to_string(&auth_path)?
-        } else {
-            "{}".to_string()
-        };
-        let auth_pre = hash_file(&auth_path)?;
-        let mut auth: Value = serde_json::from_str(&auth_orig).map_err(|e| {
-            anyhow::anyhow!(
-                "{} 解析失败（{}），已中止，不会写入任何文件",
-                auth_path.display(),
-                e
-            )
-        })?;
-
-        let auth_obj = auth
-            .as_object_mut()
-            .ok_or_else(|| anyhow::anyhow!("{} 顶层不是对象", auth_path.display()))?;
-
-        let mut auth_summary = Vec::new();
-        let mut auth_changed = false;
-
-        // 先移除未分配的。按 id 匹配 —— Pi 的 auth.json 键就是 provider id，
-        // 而母版的 id 本来就从这里来。
-        for p in &unassigned {
-            if auth_obj.remove(p.id.as_str()).is_some() {
-                auth_summary.push(format!("移除 {}（未分配给 pi）", p.name));
-                auth_changed = true;
-            }
-        }
-
-        for p in &wanted {
-            let entry = auth_obj.get(p.id.as_str());
-
-            match entry.and_then(|e| e.get("key")).and_then(|k| k.as_str()) {
-                Some(existing) if existing == p.api_key => {
-                    auth_summary.push(format!("{} 的 key 已一致", p.name));
-                }
-                Some(_) => {
-                    // 只改 key，保留 type 等其他字段
-                    if let Some(e) = auth_obj.get_mut(p.id.as_str()).and_then(|v| v.as_object_mut())
-                    {
-                        e.insert("key".into(), Value::String(p.api_key.clone()));
-                        auth_summary.push(format!("更新 {} 的 key", p.name));
-                        auth_changed = true;
-                    }
-                }
-                None => {
-                    let mut e = Map::new();
-                    // Pi 的 type 是 "api_key"，注意和 opencode 的 "api" 不同
-                    e.insert("type".into(), Value::String("api_key".into()));
-                    e.insert("key".into(), Value::String(p.api_key.clone()));
-                    auth_obj.insert(p.id.clone(), Value::Object(e));
-                    auth_summary.push(format!("新增 {} 到 auth.json", p.name));
-                    auth_changed = true;
-                }
-            }
-        }
-
-        let auth_content = if auth_changed {
-            let mut s = serde_json::to_string_pretty(&auth)?;
-            s.push('\n');
-            s
-        } else {
-            auth_orig
-        };
-
-        plans.push(FilePlan {
-            path: contract_tilde(&auth_path),
-            agent: "pi".to_string(),
-            content: auth_content,
-            pre_hash: auth_pre,
-            post_hash: String::new(),
-            changed: auth_changed,
-            summary: auth_summary,
-        });
-
-        // ---- models.json ----
-        let models_orig = if models_path.exists() {
-            std::fs::read_to_string(&models_path)?
-        } else {
-            r#"{"providers":{}}"#.to_string()
-        };
+        let models_orig = std::fs::read_to_string(&models_path)?;
         let models_pre = hash_file(&models_path)?;
         let mut models: Value = serde_json::from_str(&models_orig).map_err(|e| {
             anyhow::anyhow!(
@@ -401,23 +357,24 @@ impl Injector for PiInjector {
             match providers_map.get_mut(p.id.as_str()) {
                 Some(existing) => {
                     let mut local_changed = false;
+                    let Some(obj) = existing.as_object_mut() else {
+                        continue;
+                    };
 
-                    // baseUrl / api
-                    let old_base = existing
-                        .get("baseUrl")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let old_api = existing.get("api").and_then(|v| v.as_str()).unwrap_or("");
-                    if old_base != p.base_url || old_api != pi_api(p.kind_for("pi")) {
-                        existing
-                            .as_object_mut()
-                            .unwrap()
-                            .insert("baseUrl".into(), Value::String(p.base_url.clone()));
-                        existing.as_object_mut().unwrap().insert(
-                            "api".into(),
-                            Value::String(pi_api(p.kind_for("pi")).to_string()),
-                        );
-                        local_changed = true;
+                    // name / baseUrl / api / apiKey 直接对齐母版
+                    for (key, want) in [
+                        ("name", p.name.clone()),
+                        ("baseUrl", p.base_url.clone()),
+                        (
+                            "api",
+                            pi_api(p.kind_for("pi")).to_string(),
+                        ),
+                        ("apiKey", p.api_key.clone()),
+                    ] {
+                        if obj.get(key).and_then(|v| v.as_str()) != Some(want.as_str()) {
+                            obj.insert(key.into(), Value::String(want));
+                            local_changed = true;
+                        }
                     }
 
                     // models：按 id 逐个字段级合并。
@@ -449,7 +406,7 @@ impl Injector for PiInjector {
             models_orig
         };
 
-        plans.push(FilePlan {
+        Ok(vec![FilePlan {
             path: contract_tilde(&models_path),
             agent: "pi".to_string(),
             content: models_content,
@@ -457,9 +414,7 @@ impl Injector for PiInjector {
             post_hash: String::new(),
             changed: models_changed,
             summary: models_summary,
-        });
-
-        Ok(plans)
+        }])
     }
 
     fn diff(&self, providers: &[Provider]) -> anyhow::Result<Vec<DiffLine>> {

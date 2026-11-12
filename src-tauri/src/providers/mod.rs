@@ -13,12 +13,18 @@
 pub mod backfill;
 pub mod claude;
 pub mod claude_bridge;
+pub mod claude_onboarding;
 pub mod codex;
 pub mod diff;
 pub mod dsh;
+pub mod gemini;
+pub mod grok;
 pub mod hermes;
+pub mod kimi;
 pub mod matrix;
+pub mod minimax;
 pub mod model;
+pub mod openclaw;
 pub mod opencode;
 pub mod pi;
 pub mod safe_write;
@@ -84,6 +90,12 @@ pub fn all_injectors() -> Vec<Box<dyn Injector>> {
         Box::new(workbuddy::WorkBuddyInjector),
         Box::new(dsh::DshInjector),
         Box::new(claude::ClaudeInjector),
+        Box::new(hermes::HermesInjector),
+        Box::new(gemini::GeminiInjector),
+        Box::new(grok::GrokInjector),
+        Box::new(openclaw::OpenClawInjector),
+        Box::new(kimi::KimiInjector),
+        Box::new(minimax::MinimaxInjector),
     ]
 }
 
@@ -168,4 +180,7 @@ pub fn sync(providers: &[Provider], dry_run: bool) -> anyhow::Result<model::Sync
 
 #[cfg(test)]
 mod matrix_ser_test;
+
+#[cfg(test)]
+mod injector_test;
 

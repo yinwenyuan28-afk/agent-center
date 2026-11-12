@@ -40,6 +40,10 @@ pub enum Command {
     #[command(subcommand)]
     Providers(ProvidersCmd),
 
+    /// Claude Code 的首次引导开关（写 ~/.claude.json）
+    #[command(subcommand)]
+    Claude(ClaudeCmd),
+
     /// MCP server 统一管理
     #[command(subcommand)]
     Mcp(McpCmd),
@@ -130,6 +134,22 @@ pub enum GitCmd {
 pub enum CredsCmd {
     /// 体检：列出所有 agent 的 key 分布、重复情况
     Inspect,
+}
+
+/// Claude Code 的首次引导开关。
+///
+/// 写的是 `~/.claude.json` 根上的 `hasCompletedOnboarding`，和 provider
+/// 无关，所以单独一组命令，不在 `providers` 下面。
+#[derive(Debug, Subcommand)]
+pub enum ClaudeCmd {
+    /// 查看当前是否跳过首次引导
+    Status,
+
+    /// 跳过首次引导（写 hasCompletedOnboarding = true）
+    Skip,
+
+    /// 恢复首次引导（删掉 hasCompletedOnboarding）
+    Restore,
 }
 
 /// MCP server 统一管理子命令。

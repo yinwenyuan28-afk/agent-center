@@ -35,10 +35,20 @@ function parseRustStructs(text) {
   const re = /pub struct (\w+) \{([\s\S]*?)\r?\n\}/g;
   let m;
   while ((m = re.exec(text)) !== null) {
-    // 检查这个 struct 上方 100 字符内有没有 camelCase 属性
+    // 检查这个 struct 上方 120 字符内有没有 camelCase 属性
     const before = text.slice(Math.max(0, m.index - 120), m.index);
     const camel = /rename_all = "camelCase"/.test(before);
-    const fields = [...m[2].matchAll(/pub (?:r#)?(\w+):/g)].map((x) => x[1]);
+
+    // 逐个字段抽取。字段级 `#[serde(rename = "default")]` 优先于
+    // struct 级的 rename_all —— 契约检查必须认得这种单字段改名，
+    // 否则会把 `default_model` 误报成多出来的字段。
+    const fields = [];
+    for (const fm of m[2].matchAll(/pub (?:r#)?(\w+):/g)) {
+      const name = fm[1];
+      const head = m[2].slice(Math.max(0, fm.index - 200), fm.index);
+      const rename = head.match(/rename\s*=\s*"([^"]+)"/)?.[1];
+      fields.push(rename ?? name);
+    }
     out.set(m[1], { fields, camel });
   }
   return out;

@@ -76,6 +76,23 @@ impl ModelSpec {
         }
     }
 
+    /// 只保留 `allowed` 里列出的输入模态。
+    ///
+    /// 各 agent 的模型 schema 接受的模态不一样，而且**往往是封闭枚举**：
+    /// Pi 的 `models.json` 只允许 `text` / `image`，DSH 的 `llm-pi-ai`
+    /// 同一套。写进一个 `video` 或 `pdf` 的后果不是"这个模态被忽略"，
+    /// 而是整份配置文件校验失败、所有自定义 provider 一起消失。
+    ///
+    /// 所以注入前必须收敛，不能原样透传母版。
+    ///
+    /// 全部被过滤掉时返回空数组，由调用方决定写不写这个字段。
+    pub fn input_within(&self, allowed: &[&str]) -> Vec<String> {
+        self.input_or_default()
+            .into_iter()
+            .filter(|m| allowed.contains(&m.as_str()))
+            .collect()
+    }
+
     /// 是否支持图像输入。WorkBuddy 只有 `supportsImages: bool` 这一个字段，
     /// 需要从模态列表反推。
     pub fn supports_images(&self) -> bool {
@@ -226,6 +243,27 @@ pub struct Provider {
     /// 只在分配了 claude 时有意义。全空则注入器按 models 下标回退。
     #[serde(default, skip_serializing_if = "ClaudeModelMap::is_empty")]
     pub claude_model_map: ClaudeModelMap,
+    /// Codex 是否绕过 ChatGPT 后端（写 `requires_openai_auth`）。
+    ///
+    /// 三态，含义不同：
+    ///
+    /// - `None`（母版里不写）：由注入器自动判断 —— 看 `~/.codex/auth.json`
+    ///   里有没有官方登录。有登录写 `true`（Codex 才显示账号、刷新 token），
+    ///   没登录写 `false`（写 `true` 会让 Codex 卡在登录页）。
+    /// - `Some(true)`：强制要求走 ChatGPT 后端。第三方端点用它会把官方登录
+    ///   发给第三方地址，一般只在配官方镜像时才对。
+    /// - `Some(false)`：强制绕过 ChatGPT 后端，只用 provider 表里的
+    ///   `experimental_bearer_token` 鉴权。
+    ///
+    /// 为什么需要手动开关：Codex 没有「绕过 ChatGPT 后端」这个 UI 概念，
+    /// 行为完全由这个字段驱动。自动判断在「装了 Codex 但想强制用第三方 key」
+    /// 或「登录态还在但临时切第三方」这两种场景下会选错。
+    #[serde(
+        default,
+        rename = "codex_requires_openai_auth",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_requires_openai_auth: Option<bool>,
     /// 备注，自由文本。用于记录 key 是哪天从哪拿的
     #[serde(default)]
     pub note: String,

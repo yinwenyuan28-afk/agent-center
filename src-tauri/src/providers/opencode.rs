@@ -1,11 +1,22 @@
 //! opencode 的 provider 注入器。
 //!
-//! 和 Pi 一样要改两个文件，但路径不同：
+//! 目标文件是 `~/.config/opencode/opencode.jsonc` **或** `opencode.json`，
+//! 按 opencode 自己的优先级选：`.jsonc` 存在就用 `.jsonc`，否则用 `.json`。
 //!
-//! - `~/.config/opencode/opencode.json`      —— provider 定义
-//! - `~/.local/share/opencode/auth.json`     —— key
+//! 早期实现固定写 `opencode.json`。cc-switch 核对后修正：本机同时存在
+//! 两个文件（`.jsonc` 里有 `shell` 设置，`.json` 里有 provider），
+//! 写错文件会让 opencode 读到的 provider 和用户看到的不是同一份。
 //!
-//! 注意 auth.json 在 `~/.local/share/` 下，不在 `.config/opencode/` 里。
+//! ## 密钥内联，不碰 auth.json
+//!
+//! 密钥写在 provider 条目里：
+//!
+//! - V1：`provider.<id>.options.apiKey`
+//! - V2：`providers.<id>.settings.apiKey`
+//!
+//! 早期实现把 key 写进 `~/.local/share/opencode/auth.json`。cc-switch 核对
+//! 后确认那个文件是 opencode 自己的登录凭据，不归注入器管；两处都写会
+//! 让 opencode 不知道该用哪个。
 //!
 //! ## V1 / V2 schema
 //!
@@ -15,6 +26,12 @@
 //!
 //! 注入器按本机已装版本选择写法：major < 2 走 V1，否则走 V2。
 //! 探测失败时默认 V1（当前桌面端主流），避免再把配置写成 OpenCode 拒收。
+//!
+//! ## 注释保留的边界
+//!
+//! `.jsonc` 允许注释，但本工具用 `serde_json` 读写 —— 带注释的文件会
+//! 解析失败并中止（不会写坏）。要做保留注释的编辑需要引入 JSONC 文档
+//! 层，当前不在这一步范围内；`diff` 会明确报解析失败，用户能看出来。
 
 use super::model::{DiffAction, DiffLine, FilePlan, ModelSpec, Provider, ProviderKind};
 use super::safe_write::hash_file;
@@ -34,20 +51,90 @@ enum Schema {
 }
 
 impl OpencodeInjector {
+    /// 按 opencode 自己的优先级选配置文件：`.jsonc` 优先，其次 `.json`，
+    /// 两个都不存在时用 `.json`（新建）。
     fn config_path() -> PathBuf {
-        super::store::home_dir()
+        let dir = super::store::home_dir()
             .join(".config")
-            .join("opencode")
-            .join("opencode.json")
+            .join("opencode");
+        let jsonc = dir.join("opencode.jsonc");
+        if jsonc.exists() {
+            return jsonc;
+        }
+        dir.join("opencode.json")
     }
 
-    fn auth_path() -> PathBuf {
-        super::store::home_dir()
-            .join(".local")
-            .join("share")
-            .join("opencode")
-            .join("auth.json")
+    /// 两个候选路径，供 `targets()` 展示（安装信息、diff 报告用）。
+    fn candidate_paths() -> Vec<PathBuf> {
+        let dir = super::store::home_dir()
+            .join(".config")
+            .join("opencode");
+        vec![dir.join("opencode.jsonc"), dir.join("opencode.json")]
     }
+}
+
+/// 去掉 JSONC 注释和尾随逗号，让 `serde_json` 能解析。
+///
+/// 只做字符串/数组边界内的扫描，不改变字符串字面量里的 `//`。
+/// 这是最小实现：保留内容语义，输出到磁盘时会丢掉注释 —— 用户能接受
+/// 的唯一替代是完全不写（opencode 的整个 provider 都改不了）。
+///
+/// 本模块的注入器和 OpenClaw 共用这一份。
+pub(crate) fn strip_jsonc(text: &str) -> String {
+    let bytes: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            out.push(c);
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        // 行注释
+        if c == '/' && i + 1 < bytes.len() && bytes[i + 1] == '/' {
+            while i < bytes.len() && bytes[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // 块注释
+        if c == '/' && i + 1 < bytes.len() && bytes[i + 1] == '*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == '*' && bytes[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+        }
+        out.push(c);
+        i += 1;
+    }
+    // 去掉 } 或 ] 前多余的逗号（尾随逗号）
+    let mut cleaned = String::with_capacity(out.len());
+    let chars: Vec<char> = out.chars().collect();
+    for (idx, ch) in chars.iter().enumerate() {
+        if *ch == ',' {
+            let rest = chars[idx + 1..].iter().find(|c| !c.is_whitespace());
+            if matches!(rest, Some('}') | Some(']')) {
+                continue;
+            }
+        }
+        cleaned.push(*ch);
+    }
+    cleaned
 }
 
 /// 探测本机 OpenCode 该用哪套 schema。
@@ -178,6 +265,9 @@ fn to_opencode_provider(p: &Provider, schema: Schema) -> Value {
             );
             let mut options = Map::new();
             options.insert("baseURL".into(), Value::String(p.base_url.clone()));
+            // key 内联在条目里。opencode 支持 `{env:NAME}` 引用，但本工具
+            // 统一写明文，与 cc-switch 的盘上形状一致。
+            options.insert("apiKey".into(), Value::String(p.api_key.clone()));
             obj.insert("options".into(), Value::Object(options));
         }
         Schema::V2 => {
@@ -187,6 +277,7 @@ fn to_opencode_provider(p: &Provider, schema: Schema) -> Value {
             );
             let mut settings = Map::new();
             settings.insert("baseURL".into(), Value::String(p.base_url.clone()));
+            settings.insert("apiKey".into(), Value::String(p.api_key.clone()));
             obj.insert("settings".into(), Value::Object(settings));
         }
     }
@@ -219,6 +310,16 @@ fn read_pkg(existing: &Value) -> &str {
         .unwrap_or("")
 }
 
+/// 读条目里的 key：V1 在 `options.apiKey`，V2 在 `settings.apiKey`。
+fn read_api_key(existing: &Value) -> &str {
+    existing
+        .get("settings")
+        .and_then(|s| s.get("apiKey"))
+        .or_else(|| existing.get("options").and_then(|o| o.get("apiKey")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+}
+
 fn expected_pkg(p: &Provider, schema: Schema) -> &'static str {
     let kind = p.kind_for("opencode");
     match schema {
@@ -233,14 +334,13 @@ impl Injector for OpencodeInjector {
     }
 
     fn targets(&self) -> Vec<PathBuf> {
-        vec![Self::config_path(), Self::auth_path()]
+        Self::candidate_paths()
     }
 
     fn plan(&self, providers: &[Provider]) -> anyhow::Result<Vec<FilePlan>> {
         let cfg_path = Self::config_path();
-        let auth_path = Self::auth_path();
 
-        if !cfg_path.exists() && !auth_path.exists() {
+        if !cfg_path.exists() {
             return Ok(Vec::new());
         }
 
@@ -262,16 +362,12 @@ impl Injector for OpencodeInjector {
         let schema = detect_schema();
         let key = top_key(schema);
 
-        let mut plans = Vec::new();
-
-        // ---- opencode.json：provider 定义 ----
-        let cfg_orig = if cfg_path.exists() {
-            std::fs::read_to_string(&cfg_path)?
-        } else {
-            "{}".to_string()
-        };
+        // ---- opencode.json(c)：provider 定义 + key ----
+        let cfg_orig = std::fs::read_to_string(&cfg_path)?;
         let cfg_pre = hash_file(&cfg_path)?;
-        let mut cfg: Value = serde_json::from_str(&cfg_orig).map_err(|e| {
+        // 文件可能是 JSONC（带注释/尾随逗号）。先剥掉再交给 serde。
+        let cfg_json = strip_jsonc(&cfg_orig);
+        let mut cfg: Value = serde_json::from_str(&cfg_json).map_err(|e| {
             anyhow::anyhow!(
                 "{} 解析失败（{}），已中止，不会写入任何文件",
                 cfg_path.display(),
@@ -324,8 +420,12 @@ impl Injector for OpencodeInjector {
                 Some(existing) => {
                     let old_base = read_base_url(existing);
                     let old_pkg = read_pkg(existing);
+                    let old_key = read_api_key(existing);
 
-                    if old_base != p.base_url || old_pkg != want_pkg {
+                    if old_base != p.base_url
+                        || old_pkg != want_pkg
+                        || old_key != p.api_key.as_str()
+                    {
                         if let Some(obj) =
                             providers_map.get_mut(p.id.as_str()).and_then(|v| v.as_object_mut())
                         {
@@ -338,6 +438,10 @@ impl Injector for OpencodeInjector {
                                         o.insert(
                                             "baseURL".into(),
                                             Value::String(p.base_url.clone()),
+                                        );
+                                        o.insert(
+                                            "apiKey".into(),
+                                            Value::String(p.api_key.clone()),
                                         );
                                     }
                                     obj.insert(
@@ -357,6 +461,10 @@ impl Injector for OpencodeInjector {
                                             "baseURL".into(),
                                             Value::String(p.base_url.clone()),
                                         );
+                                        s.insert(
+                                            "apiKey".into(),
+                                            Value::String(p.api_key.clone()),
+                                        );
                                     }
                                     obj.insert(
                                         "package".into(),
@@ -366,7 +474,7 @@ impl Injector for OpencodeInjector {
                                     obj.remove("options");
                                 }
                             }
-                            cfg_summary.push(format!("更新 {} 的 baseURL/包名", p.name));
+                            cfg_summary.push(format!("更新 {} 的 baseURL/包名/key", p.name));
                             cfg_changed = true;
                         }
                     } else {
@@ -375,7 +483,7 @@ impl Injector for OpencodeInjector {
                 }
                 None => {
                     providers_map.insert(p.id.clone(), new_def);
-                    cfg_summary.push(format!("新增 {} 到 opencode.json", p.name));
+                    cfg_summary.push(format!("新增 {} 到 opencode", p.name));
                     cfg_changed = true;
                 }
             }
@@ -389,7 +497,7 @@ impl Injector for OpencodeInjector {
             cfg_orig
         };
 
-        plans.push(FilePlan {
+        Ok(vec![FilePlan {
             path: contract_tilde(&cfg_path),
             agent: "opencode".to_string(),
             content: cfg_content,
@@ -397,85 +505,7 @@ impl Injector for OpencodeInjector {
             post_hash: String::new(),
             changed: cfg_changed,
             summary: cfg_summary,
-        });
-
-        // ---- auth.json：key ----
-        let auth_orig = if auth_path.exists() {
-            std::fs::read_to_string(&auth_path)?
-        } else {
-            "{}".to_string()
-        };
-        let auth_pre = hash_file(&auth_path)?;
-        let mut auth: Value = serde_json::from_str(&auth_orig).map_err(|e| {
-            anyhow::anyhow!(
-                "{} 解析失败（{}），已中止，不会写入任何文件",
-                auth_path.display(),
-                e
-            )
-        })?;
-
-        let auth_obj = auth
-            .as_object_mut()
-            .ok_or_else(|| anyhow::anyhow!("{} 顶层不是对象", auth_path.display()))?;
-
-        let mut auth_summary = Vec::new();
-        let mut auth_changed = false;
-
-        for p in &unassigned {
-            if auth_obj.remove(p.id.as_str()).is_some() {
-                auth_summary.push(format!("移除 {} 的 key（未分配给 opencode）", p.name));
-                auth_changed = true;
-            }
-        }
-
-        for p in &wanted {
-            match auth_obj
-                .get(p.id.as_str())
-                .and_then(|e| e.get("key"))
-                .and_then(|k| k.as_str())
-            {
-                Some(existing) if existing == p.api_key => {
-                    auth_summary.push(format!("{} 的 key 已一致", p.name));
-                }
-                Some(_) => {
-                    if let Some(e) = auth_obj.get_mut(p.id.as_str()).and_then(|v| v.as_object_mut())
-                    {
-                        e.insert("key".into(), Value::String(p.api_key.clone()));
-                        auth_summary.push(format!("更新 {} 的 key", p.name));
-                        auth_changed = true;
-                    }
-                }
-                None => {
-                    let mut e = Map::new();
-                    // opencode 的 type 是 "api"，注意和 Pi 的 "api_key" 不同
-                    e.insert("type".into(), Value::String("api".into()));
-                    e.insert("key".into(), Value::String(p.api_key.clone()));
-                    auth_obj.insert(p.id.clone(), Value::Object(e));
-                    auth_summary.push(format!("新增 {} 到 auth.json", p.name));
-                    auth_changed = true;
-                }
-            }
-        }
-
-        let auth_content = if auth_changed {
-            let mut s = serde_json::to_string_pretty(&auth)?;
-            s.push('\n');
-            s
-        } else {
-            auth_orig
-        };
-
-        plans.push(FilePlan {
-            path: contract_tilde(&auth_path),
-            agent: "opencode".to_string(),
-            content: auth_content,
-            pre_hash: auth_pre,
-            post_hash: String::new(),
-            changed: auth_changed,
-            summary: auth_summary,
-        });
-
-        Ok(plans)
+        }])
     }
 
     fn diff(&self, providers: &[Provider]) -> anyhow::Result<Vec<DiffLine>> {

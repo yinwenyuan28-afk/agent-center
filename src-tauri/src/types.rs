@@ -450,6 +450,11 @@ pub struct ProviderView {
     pub agents: Vec<String>,
     /// Claude Code 档位映射。未配置时为空对象
     pub claude_model_map: ClaudeModelMap,
+    /// Codex 是否绕过 ChatGPT 后端（`requires_openai_auth`）。
+    ///
+    /// `null` 表示交给注入器按盘上登录态自动判断；`true` / `false` 是用户
+    /// 在界面上强制指定。
+    pub codex_requires_openai_auth: Option<bool>,
     pub note: String,
     /// key 长度，用于界面提示"已配置"
     pub key_len: usize,
@@ -457,7 +462,22 @@ pub struct ProviderView {
     pub key_tail: String,
 }
 
-/// 一条差异，前端展示用。
+/// Claude Code 首次启动引导（onboarding）开关的状态。
+///
+/// 对应 `~/.claude.json` 根上的 `hasCompletedOnboarding`。这个标记
+/// 和 provider 无关，是「这台机器上的 Claude Code 是否已完成引导」。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeOnboardingStatus {
+    /// 实际读写的文件路径，界面展示用
+    pub path: String,
+    /// Claude Code 装没装（`~/.claude.json` 或 `~/.claude` 存在即可）
+    pub available: bool,
+    /// 当前是否已跳过引导
+    pub skipped: bool,
+}
+
+/// 一条差异。前端展示用。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderDiffLine {

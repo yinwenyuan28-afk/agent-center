@@ -2,12 +2,14 @@
 //!
 //! 四个能力全有：指令文件（`AGENTS.md`）、provider、MCP、凭证体检。
 //!
-//! ## provider：key 不进配置文件
+//! ## provider：单槽位，key 内联在表里
 //!
-//! Codex 的 `[model_providers.<id>]` 只有 `env_key` 字段存**环境变量名**，
-//! key 本身必须从进程环境读。所以注入器做两件事：改 `config.toml`
-//! 写 provider 表，再生成 `~/.agents/codex-env.ps1` 把 key 设进环境变量。
-//! 用户使用 Codex 前要 `. ~/.agents/codex-env.ps1`。
+//! Codex 只有一张第三方表 `[model_providers.custom]`，顶层
+//! `model_provider` 指向它。密钥写在表的 `experimental_bearer_token`，
+//! 和 cc-switch 的盘上形状一致 —— Codex 0.149 起自定义 provider 不再
+//! 从 `auth.json` 读密钥，也不再需要单独的环境变量脚本。
+//!
+//! 所以这是**单槽位** agent：同一时刻只有一个 provider 生效。
 //!
 //! 具体逻辑在 [`crate::providers::codex`]。
 
@@ -69,11 +71,14 @@ impl Agent for Codex {
         &[OpenaiResponses]
     }
 
+    /// Codex 一次只能指向一家第三方供应商：`[model_providers.custom]`
+    /// 只有一张表，顶层 `model_provider` 只认一个值。
+    fn single_slot(&self) -> bool {
+        true
+    }
+
     fn provider_targets(&self) -> Vec<PathBuf> {
-        vec![
-            home_dir().join(".codex").join("config.toml"),
-            home_dir().join(".agents").join("codex-env.ps1"),
-        ]
+        vec![home_dir().join(".codex").join("config.toml")]
     }
 
     fn provider_scan(&self) -> Option<AgentScan> {

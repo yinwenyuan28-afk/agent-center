@@ -233,6 +233,8 @@
           models: (p.models ?? []).map(normalizeModel),
           agents: p.agents ?? [],
           claudeModelMap: p.claudeModelMap ?? {},
+          // 旧后端可能完全不返回这个字段；补成 null（= 自动）
+          codexRequiresOpenaiAuth: p.codexRequiresOpenaiAuth ?? null,
         })),
       };
       providers = (await withTimeout(listProviders(), '读取 provider 列表')).map((p) => ({
@@ -241,6 +243,7 @@
         models: (p.models ?? []).map(normalizeModel),
         agents: p.agents ?? [],
         claudeModelMap: p.claudeModelMap ?? {},
+        codexRequiresOpenaiAuth: p.codexRequiresOpenaiAuth ?? null,
       }));
     } catch (e) {
       log = `读取失败：${e instanceof Error ? e.message : String(e)}`;
@@ -402,7 +405,19 @@
     }
   }
 
-  /** 点卡片正文时要打开的额外配置。没有就返回 null，正文不可点。 */
+  /**
+   * 点卡片正文时要打开的额外配置。没有就返回 null，正文不可点。
+   *
+   * 目前只有 Claude Code 的档位映射挂在这里 —— 它是 provider 级配置，
+   * 改哪个 provider 的映射就在那一行点。
+   *
+   * Codex 的「是否绕过 ChatGPT 后端」虽然也是 provider 级，但已经移到
+   * 侧栏的 Claude & Codex 页：它只有一条（单槽位），放那儿比藏在
+   * 分配矩阵的卡片里好找。
+   *
+   * 单槽位判断**不要**写在这里 —— 那是 `matrix.columns` 的
+   * `singleSlot` 字段，后端声明、前端只读。
+   */
   function agentDetail(agent: string): 'claude-map' | null {
     if (agent === 'claude') return 'claude-map';
     return null;
@@ -411,8 +426,10 @@
   /** 打开这个 agent 的额外配置。不改启用状态。 */
   function openAgentDetail(providerId: string, agent: string) {
     const row = matrix?.providers.find((p) => p.id === providerId);
-    if (!row || agentDetail(agent) !== 'claude-map') return;
-    openClaudeMapDialog(providerId, [...row.agents], 'edit');
+    if (!row) return;
+    if (agentDetail(agent) === 'claude-map') {
+      openClaudeMapDialog(providerId, [...row.agents], 'edit');
+    }
   }
 
   /** 全选 / 全不选所有可用 agent。Claude 仍只保留这一个 provider。 */
@@ -572,6 +589,9 @@
         agentKinds: Object.fromEntries(
           Object.entries(form.agentKinds).filter(([, k]) => k !== form.kind),
         ),
+        // 原样带回：编辑其他字段不能把 Codex 的后端设置洗掉。
+        // 这个值只在分配页的 Codex 弹窗里改。
+        codexRequiresOpenaiAuth: editing ? (editing.codexRequiresOpenaiAuth ?? null) : null,
         note: form.note.trim(),
       });
       log = r.output;
@@ -747,7 +767,8 @@
               >
                 <span class="block truncate text-[12px] font-medium">{col.label}</span>
                 <span class="block text-[10px] {on ? 'opacity-80' : 'text-[var(--color-text-faint)]'}">
-                  {on ? '已启用' : '未启用'} · 配置档位
+                  {on ? '已启用' : '未启用'} ·
+                  {detail === 'claude-map' ? '配置档位' : '配置后端'}
                 </span>
               </button>
             {:else}
@@ -804,6 +825,7 @@
     刷新
   </Button>
 </div>
+
 
 <!-- 编辑对话框。点遮罩或取消关闭，不自动保存。 -->
 {#if isNew || editing}
@@ -903,11 +925,8 @@
                   {@const assigned = editing ? editing.agents.includes(col.agent) : false}
                   {@const overridden = hasOverride(col.agent)}
                   {@const options = kindsForAgent(col.agent)}
-                  <div class="flex items-center gap-2 {assigned ? '' : 'opacity-50'}">
-                    <span
-                      class="w-[120px] shrink-0 truncate text-[13px] text-[var(--color-text)]"
-                      title={col.label}
-                    >
+                  <div class="grid grid-cols-[7.5rem_minmax(0,1fr)_4.5rem] items-center gap-x-4 {assigned ? '' : 'opacity-50'}">
+                    <span class="truncate text-[13px] text-[var(--color-text)]" title={col.label}>
                       {col.label}
                     </span>
                     {#if options.length === 1}
@@ -930,13 +949,14 @@
                     {/if}
                     {#if overridden && options.length > 1}
                       <button
-                        class="w-[56px] shrink-0 text-[12px] text-[var(--color-text-faint)] underline-offset-2 hover:text-[var(--color-accent)] hover:underline"
+                        type="button"
+                        class="whitespace-nowrap text-right text-[12px] text-[var(--color-text-faint)] underline-offset-2 hover:text-[var(--color-accent)] hover:underline"
                         onclick={() => delete form.agentKinds[col.agent]}
                       >
                         恢复默认
                       </button>
                     {:else}
-                      <span class="w-[56px] shrink-0 text-[12px] text-[var(--color-text-faint)]">
+                      <span class="text-right text-[12px] text-[var(--color-text-faint)]">
                         {options.length === 1 ? '固定' : '默认'}
                       </span>
                     {/if}
@@ -1370,6 +1390,7 @@
   </div>
 {/if}
 
+
 <style>
   /* 表单标签与控件成套：字号 12/13，控件高度统一，避免「字小框大」 */
   :global(.field-label) {
@@ -1389,12 +1410,27 @@
     background: var(--color-bg);
     padding: 0 10px;
     font-size: 13px;
-    line-height: 1.4;
+    line-height: 34px;
     color: var(--color-text);
   }
 
+  /* 协议固定、不能下拉的那一格，文字要和选择框同一条中线。 */
+  :global(span.field-control) {
+    display: flex;
+    align-items: center;
+    line-height: 1.4;
+  }
+
+  /* 去掉系统自带的下拉按钮，否则在 WebView 里箭头会压到圆角边框上。 */
   :global(select.field-control) {
-    padding-right: 28px;
+    appearance: none;
+    -webkit-appearance: none;
+    padding-right: 32px;
+    background-color: var(--color-bg);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' viewBox='0 0 16 16'%3E%3Cpath stroke='%23999999' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 16px 16px;
   }
 
   :global(.field-control:disabled) {

@@ -29,8 +29,12 @@ pub mod codex;
 pub mod cursor;
 pub mod dsh;
 pub mod gemini;
+pub mod grok;
 pub mod hermes;
+pub mod kimi;
+pub mod minimax;
 pub mod model;
+pub mod openclaw;
 pub mod opencode;
 pub mod pi;
 pub mod qoder;
@@ -203,6 +207,10 @@ pub fn all() -> Vec<Box<dyn Agent>> {
         Box::new(hermes::Hermes),
         Box::new(zed::Zed),
         Box::new(gemini::Gemini),
+        Box::new(grok::Grok),
+        Box::new(openclaw::OpenClaw),
+        Box::new(kimi::Kimi),
+        Box::new(minimax::Minimax),
     ];
     list.sort_by_key(|a| a.order());
     list

@@ -169,6 +169,18 @@ const gitStatus: GitStatus = {
 
 const ok = (output: string): RunResult => ({ ok: true, exitCode: 0, output });
 
+/**
+ * 预览模式下可变的状态。
+ *
+ * 两个后端开关改了之后要能立刻看到效果，所以把状态留在模块级：
+ * 否则 `list_providers` 每次返回同一份常量，点了没反应。
+ */
+const mockState = {
+  claudeOnboardingSkipped: true,
+  /** provider id → codex_requires_openai_auth */
+  codexAuth: new Map<string, boolean | null>([['command', null]]),
+};
+
 /** 假后端的总入口，按命令名分发。 */
 export async function handle(command: string, args?: Record<string, unknown>): Promise<unknown> {
   // 模拟真实 IPC 的往返延迟，让加载态在开发时也能被看到
@@ -299,7 +311,8 @@ export async function handle(command: string, args?: Record<string, unknown>): P
               reasoningEfforts: [],
             },
           ],
-          agents: ['claude', 'zcode', 'pi'],
+          agents: ['claude', 'zcode', 'pi', 'codex'],
+          codexRequiresOpenaiAuth: mockState.codexAuth.get('command') ?? null,
           claudeModelMap: {
             opus: 'deepseek/deepseek-v4.1-flash',
             sonnet: 'xiaomi/mimo-v2.5',
@@ -393,7 +406,7 @@ export async function handle(command: string, args?: Record<string, unknown>): P
       return {
         columns: [
           { agent: 'claude', label: 'Claude Code', available: true, note: '', singleSlot: true, supportedKinds: ['anthropic'] },
-          { agent: 'codex', label: 'Codex CLI', available: true, note: '', singleSlot: false, supportedKinds: ['openai-responses'] },
+          { agent: 'codex', label: 'Codex CLI', available: true, note: '', singleSlot: true, supportedKinds: ['openai-responses'] },
           { agent: 'pi', label: 'pi', available: true, note: '', singleSlot: false, supportedKinds: [] },
           { agent: 'opencode', label: 'opencode', available: true, note: '', singleSlot: false, supportedKinds: [] },
           { agent: 'workbuddy', label: 'WorkBuddy', available: true, note: '', singleSlot: false, supportedKinds: [] },
@@ -435,7 +448,8 @@ export async function handle(command: string, args?: Record<string, unknown>): P
                 reasoningEfforts: [],
               },
             ],
-            agents: ['claude', 'zcode', 'pi'],
+            agents: ['claude', 'zcode', 'pi', 'codex'],
+            codexRequiresOpenaiAuth: mockState.codexAuth.get('command') ?? null,
             claudeModelMap: {
               opus: 'deepseek/deepseek-v4.1-flash',
               sonnet: 'xiaomi/mimo-v2.5',
@@ -540,6 +554,33 @@ export async function handle(command: string, args?: Record<string, unknown>): P
 
     case 'write_providers_toml':
       return ok('母版已保存');
+
+    // ---- Claude 引导 / Codex 后端（浏览器预览假数据）----
+    case 'claude_onboarding_status':
+      return {
+        path: '~/.claude.json',
+        available: true,
+        skipped: mockState.claudeOnboardingSkipped,
+      };
+
+    case 'set_claude_onboarding_skip': {
+      const skip = args?.skip === true;
+      mockState.claudeOnboardingSkipped = skip;
+      return ok(
+        skip
+          ? '已写入 hasCompletedOnboarding = true，下次启动跳过引导'
+          : '已删除 hasCompletedOnboarding，下次启动会重新出现引导',
+      );
+    }
+
+    case 'set_codex_requires_openai_auth': {
+      const id = String(args?.providerId ?? '');
+      const value = (args?.value ?? null) as boolean | null;
+      mockState.codexAuth.set(id, value);
+      const label =
+        value === null ? '自动' : value ? '走 ChatGPT 后端' : '绕过 ChatGPT 后端';
+      return ok(`requires_openai_auth = ${value ?? '自动'}（${label}）`);
+    }
 
     // ---- MCP 管理（浏览器预览假数据）----
     case 'list_mcp_servers':

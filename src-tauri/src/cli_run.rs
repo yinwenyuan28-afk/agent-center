@@ -108,6 +108,7 @@ pub fn run(cmd: Command) -> i32 {
         Command::Skills(sub) => run_skills(sub),
         Command::Creds(sub) => run_creds(sub),
         Command::Providers(sub) => run_providers(sub),
+        Command::Claude(sub) => run_claude(sub),
         Command::Mcp(sub) => run_mcp(sub),
         Command::Agents => run_agents(),
         Command::Models(sub) => run_models(sub),
@@ -365,6 +366,61 @@ fn run_mcp(cmd: crate::cli::McpCmd) -> i32 {
     }
 }
 
+/// Claude Code 的首次引导开关。
+///
+/// 操作的是 `~/.claude.json` 根上的 `hasCompletedOnboarding`，
+/// 和 provider 无关。
+fn run_claude(cmd: crate::cli::ClaudeCmd) -> i32 {
+    use crate::cli::ClaudeCmd;
+    use crate::providers::claude_onboarding as ob;
+
+    match cmd {
+        ClaudeCmd::Status => {
+            let status = match ob::status() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("读取状态失败: {e}");
+                    return 1;
+                }
+            };
+            println!("文件：{}", status.path);
+            if !status.available {
+                println!("Claude Code 未安装（{} 和 ~/.claude 都不存在）", status.path);
+                return 0;
+            }
+            println!(
+                "首次引导：{}",
+                if status.skipped {
+                    "已跳过（hasCompletedOnboarding = true）"
+                } else {
+                    "会显示（没有 hasCompletedOnboarding）"
+                }
+            );
+            0
+        }
+        ClaudeCmd::Skip => match ob::set_skipped(true) {
+            Ok((_, msg)) => {
+                println!("{msg}");
+                0
+            }
+            Err(e) => {
+                eprintln!("写入失败: {e}");
+                1
+            }
+        },
+        ClaudeCmd::Restore => match ob::set_skipped(false) {
+            Ok((_, msg)) => {
+                println!("{msg}");
+                0
+            }
+            Err(e) => {
+                eprintln!("写入失败: {e}");
+                1
+            }
+        },
+    }
+}
+
 /// provider 统一管理子命令。
 fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
     use crate::cli::ProvidersCmd;
@@ -604,6 +660,9 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                         .collect(),
                     agents,
                     claude_model_map: model::ClaudeModelMap::default(),
+                    // CLI 的 providers set 不碰这个开关；要用就写母版
+                    // 的 codex_requires_openai_auth，或走界面上的 Codex 配置
+                    codex_requires_openai_auth: None,
                     note: String::new(),
                 });
             }

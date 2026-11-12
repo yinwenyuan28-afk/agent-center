@@ -1,16 +1,31 @@
 //! Gemini CLI。
 //!
-//! 本机未安装，各项能力都未实测。这里只登记它的身份，
-//! 把原先游离在 `credentials.rs::unsupported_agents()` 里的那条
-//! 「gemini 用浏览器 OAuth」收进来，让 agent 清单只剩一处。
+//! ## provider：单槽位
 //!
-//! 等装了之后按 opencode 的模式补 provider（`~/.gemini/settings.json`）。
+//! Gemini CLI 只有一份 live 配置：`~/.gemini/.env`（key / 端点 / 模型）
+//! 和 `~/.gemini/settings.json`（认证方式 / 模型名）。所以同一时刻只有
+//! 一个 provider 生效。
+//!
+//! **本机未安装**，实现是按 cc-switch 的 `gemini_config.rs` 移植的，
+//! 装好之后要按真实文件核对。
 
 use super::Agent;
+use crate::providers::model::{FilePlan, Provider};
+use crate::providers::scan::AgentScan;
 use crate::providers::store::home_dir;
 use std::path::PathBuf;
 
 pub struct Gemini;
+
+impl Gemini {
+    fn dir() -> PathBuf {
+        home_dir().join(".gemini")
+    }
+
+    fn env_path() -> PathBuf {
+        Self::dir().join(".env")
+    }
+}
 
 impl Agent for Gemini {
     fn id(&self) -> &'static str {
@@ -26,18 +41,77 @@ impl Agent for Gemini {
     }
 
     fn config_dir(&self) -> PathBuf {
-        home_dir().join(".gemini")
+        Self::dir()
     }
 
     fn instruction_file(&self) -> Option<PathBuf> {
-        Some(home_dir().join(".gemini").join("AGENTS.md"))
+        Some(Self::dir().join("AGENTS.md"))
     }
 
     fn skills_dir(&self) -> PathBuf {
-        home_dir().join(".gemini").join("skills")
+        Self::dir().join("skills")
     }
 
-    fn credential_unsupported(&self) -> Option<&'static str> {
-        Some("使用浏览器 OAuth 登录，本地无明文 key")
+    fn supports_provider(&self) -> bool {
+        true
+    }
+
+    fn provider_ready(&self) -> bool {
+        Self::env_path().exists() || Self::dir().join("settings.json").exists()
+    }
+
+    /// 只有一组 live 环境变量，和一个 provider 生效。
+    fn single_slot(&self) -> bool {
+        true
+    }
+
+    /// Gemini CLI 走自己的协议适配，本工具只写 OpenAI 兼容端点。
+    fn supported_kinds(&self) -> &'static [crate::providers::model::ProviderKind] {
+        use crate::providers::model::ProviderKind::{Anthropic, OpenaiChat, OpenaiResponses};
+        &[Anthropic, OpenaiChat, OpenaiResponses]
+    }
+
+    fn provider_targets(&self) -> Vec<PathBuf> {
+        vec![Self::env_path(), Self::dir().join("settings.json")]
+    }
+
+    fn provider_scan(&self) -> Option<AgentScan> {
+        Some(crate::providers::scan::scan_gemini())
+    }
+
+    fn provider_plan(&self, providers: &[Provider]) -> anyhow::Result<Vec<FilePlan>> {
+        use crate::providers::Injector;
+        crate::providers::gemini::GeminiInjector.plan(providers)
+    }
+
+    fn credential_entries(&self) -> Vec<crate::agents::RawEntry> {
+        let mut out = Vec::new();
+        let path = Self::env_path();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return out;
+        };
+        let mut key = None;
+        let mut base = "官方 Google".to_string();
+        for line in text.lines() {
+            let t = line.trim();
+            if let Some(v) = t.strip_prefix("GEMINI_API_KEY=") {
+                key = Some(v.trim().to_string());
+            } else if let Some(v) = t.strip_prefix("GOOGLE_GEMINI_BASE_URL=") {
+                if !v.trim().is_empty() {
+                    base = v.trim().to_string();
+                }
+            }
+        }
+        if let Some(k) = key {
+            crate::agents::model::collect(
+                &mut out,
+                "gemini",
+                &base,
+                "api_key",
+                ".env · GEMINI_API_KEY",
+                Some(&k),
+            );
+        }
+        out
     }
 }

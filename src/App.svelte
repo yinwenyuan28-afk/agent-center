@@ -9,13 +9,14 @@
   import Skills from './pages/Skills.svelte';
   import Store from './pages/Store.svelte';
   import Providers from './pages/Providers.svelte';
+  import ClaudeCodex from './pages/ClaudeCodex.svelte';
   import Mcp from './pages/Mcp.svelte';
   import Git from './pages/Git.svelte';
   import TitleBar from './lib/components/TitleBar.svelte';
   import { isNative } from './lib/ipc';
   import { cn } from './lib/utils';
 
-  type Page = 'mappings' | 'skills' | 'store' | 'providers' | 'mcp' | 'git';
+  type Page = 'mappings' | 'skills' | 'store' | 'providers' | 'claude-codex' | 'mcp' | 'git';
 
   const pages: { id: Page; label: string; hint: string }[] = [
     { id: 'mappings', label: 'AGENTS文档映射', hint: 'AGENTS.md' },
@@ -23,6 +24,8 @@
     { id: 'store', label: 'Skill 更新', hint: '第三方' },
     // Provider 和 MCP 同一种模型：一个池子 + 逐条分配
     { id: 'providers', label: 'Provider', hint: '池 + 分配' },
+    // 这两家有配置文件里有、但工具本身没提供界面的开关
+    { id: 'claude-codex', label: 'Claude & Codex', hint: '专属设置' },
     { id: 'mcp', label: 'MCP', hint: '池 + 分配' },
     { id: 'git', label: 'Git', hint: '版本管理' },
   ];
@@ -88,6 +91,8 @@
         <Store />
       {:else if current === 'providers'}
         <Providers />
+      {:else if current === 'claude-codex'}
+        <ClaudeCodex />
       {:else if current === 'mcp'}
         <Mcp />
       {:else}

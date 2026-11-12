@@ -39,13 +39,20 @@ pub fn model_speaks_messages(id: &str) -> bool {
 }
 
 /// 这一家要不要经本地转换再交给 Claude Code。
-pub fn needs_bridge(kind: ProviderKind, model_ids: &[String]) -> bool {
-    match kind {
-        ProviderKind::Anthropic => model_ids.iter().any(|id| !model_speaks_messages(id)),
-        ProviderKind::OpenaiChat | ProviderKind::OpenaiResponses | ProviderKind::GoogleGenAi => {
-            true
-        }
-    }
+///
+/// **只看协议，不看模型名**。早期实现还会按「模型 id 不是 claude- 开头」
+/// 判断，但那个推断是错的：Anthropic 兼容端点（如 MiniMax 的
+/// `api.minimax.cn/anthropic`）本来就提供 `/v1/messages`，模型名是
+/// 厂商自己的（`MiniMax-M3`），直连完全正常。按模型名判断会把这类
+/// 端点错误地送去 `/chat/completions`，直接 404。
+///
+/// 协议在母版里是按 agent 分开的（`agent_kinds.claude`），用户可以
+/// 明确指定这一家对 Claude 用哪种协议 —— 以声明为准。
+///
+/// 判断模型名的函数仍然保留，因为转换层内部要用它决定单个请求走哪条
+/// 上游路径（混合了 claude-* 模型的网关）。
+pub fn needs_bridge(kind: ProviderKind, _model_ids: &[String]) -> bool {
+    !matches!(kind, ProviderKind::Anthropic)
 }
 
 pub fn bridge_file_content(upstream: &str, kind: ProviderKind) -> String {
@@ -1098,13 +1105,19 @@ mod tests {
         assert!(model_speaks_messages("anthropic/claude-opus-5"));
     }
 
+    /// Anthropic 协议永远直连，与模型名无关。
+    ///
+    /// 早期这里断言「Anthropic + 非 claude 模型 → 要转换」。那个推断是
+    /// 错的：MiniMax 这类 Anthropic 兼容端点的模型名本来就不是 claude-，
+    /// 直连 `/v1/messages` 完全正常。按模型名判断会把它们错误地翻成
+    /// `/chat/completions`，直接 404。
     #[test]
-    fn bridge_only_when_a_model_cannot_speak_messages() {
+    fn bridge_only_when_the_protocol_is_not_anthropic() {
         assert!(!needs_bridge(
             ProviderKind::Anthropic,
             &["claude-sonnet-5-5".into()]
         ));
-        assert!(needs_bridge(
+        assert!(!needs_bridge(
             ProviderKind::Anthropic,
             &["deepseek/deepseek-v4.1-flash".into()]
         ));

@@ -374,19 +374,21 @@ pub fn scan_pi() -> AgentScan {
     }
 }
 
-/// 扫描 opencode：`opencode.json` 定义 + `~/.local/share/opencode/auth.json` 的 key。
+/// 扫描 opencode：`opencode.jsonc` / `opencode.json` 的 provider 条目。
+///
+/// 和注入器保持一致：`.jsonc` 优先；key 读条目内联的
+/// `options.apiKey`（V1）或 `settings.apiKey`（V2）。
 pub fn scan_opencode() -> AgentScan {
-    let cfg = home().join(".config").join("opencode").join("opencode.json");
-    let auth_path = home()
-        .join(".local")
-        .join("share")
-        .join("opencode")
-        .join("auth.json");
-    let present = cfg.exists() || auth_path.exists();
+    let dir = home().join(".config").join("opencode");
+    let cfg = if dir.join("opencode.jsonc").exists() {
+        dir.join("opencode.jsonc")
+    } else {
+        dir.join("opencode.json")
+    };
+    let present = cfg.exists();
     let mut providers = Vec::new();
 
     let json = read_json(&cfg);
-    let auth = read_json(&auth_path);
 
     // 新版结构在 providers 下，旧版在 provider 下
     let block = json
@@ -403,19 +405,13 @@ pub fn scan_opencode() -> AgentScan {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            // key 可能在 auth.json，也可能（旧版）直接在 options 里
-            let auth_key = auth
-                .as_ref()
-                .and_then(|a| a.get(id))
-                .and_then(|e| e.get("key"))
+            // key 内联在条目里：V2 在 settings.apiKey，V1 在 options.apiKey
+            let key = p
+                .get("settings")
+                .and_then(|s| s.get("apiKey"))
+                .or_else(|| p.get("options").and_then(|o| o.get("apiKey")))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let inline_key = p
-                .get("options")
-                .and_then(|o| o.get("apiKey"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let key = if !auth_key.is_empty() { auth_key } else { inline_key };
 
             let models: Vec<ModelSpec> = p
                 .get("models")
@@ -473,8 +469,8 @@ pub fn scan_opencode() -> AgentScan {
 
 /// 扫描 Codex：`~/.codex/config.toml` 的 `model_providers` 表。
 ///
-/// 注意 Codex 的 key 不落盘，只有 `env_key` 指向环境变量名。
-/// 这里能读到的是环境变量名，不是 key 本身。
+/// key 现在内联在表的 `experimental_bearer_token` 里；旧形态是
+/// `env_key` 指向环境变量名。两种都读，内联的优先。
 pub fn scan_codex() -> AgentScan {
     let path = home().join(".codex").join("config.toml");
     let present = path.exists();
@@ -489,13 +485,21 @@ pub fn scan_codex() -> AgentScan {
                         .get("base_url")
                         .and_then(|x| x.as_str())
                         .unwrap_or("");
-                    // key 在环境变量里，这里只能拿到变量名
+
+                    // key：内联 bearer token 优先，其次 env_key 指向的环境变量
+                    let inline = v
+                        .get("experimental_bearer_token")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
                     let env_key = v.get("env_key").and_then(|x| x.as_str()).unwrap_or("");
-                    let key_len = if env_key.is_empty() {
-                        0
+                    let key = if !inline.is_empty() {
+                        inline.to_string()
+                    } else if env_key.is_empty() {
+                        String::new()
                     } else {
-                        std::env::var(env_key).map(|s| s.len()).unwrap_or(0)
+                        std::env::var(env_key).unwrap_or_default()
                     };
+                    let key_len = key.len();
 
                     providers.push(FoundProvider {
                         id: id.to_string(),
@@ -507,15 +511,10 @@ pub fn scan_codex() -> AgentScan {
                             .and_then(|x| x.as_str())
                             .map(ProviderKind::parse),
 
-                        // 环境变量读得到才算指纹，读不到留空
-                        key_fp: std::env::var(env_key)
-                            .ok()
-                            .filter(|s| s.len() >= 16)
-                            .map(|s| fp(&s))
-                            .unwrap_or_default(),
+                        key_fp: if key.len() >= 16 { fp(&key) } else { String::new() },
                         key_len,
                         models: Vec::new(),
-                        location: format!("config.toml · model_providers.{id} (env_key={env_key})"),
+                        location: format!("config.toml · model_providers.{id}"),
                     });
                 }
             }
@@ -834,8 +833,10 @@ pub fn scan_hermes() -> AgentScan {
     let mut providers = Vec::new();
 
     if let Ok(text) = std::fs::read_to_string(&path) {
-        if let Some(providers_block) = find_yaml_top_block(&text, "providers") {
-            providers = parse_hermes_providers(providers_block);
+        // 只读可写的 `custom_providers:` 列表。v12 的 `providers:` 字典
+        // 归 Hermes 自己管，写入会被拒绝，扫描也不把它当成可管理条目。
+        if let Some(block) = find_yaml_top_block(&text, "custom_providers") {
+            providers = parse_hermes_custom_providers(block);
         }
     }
 
@@ -845,6 +846,157 @@ pub fn scan_hermes() -> AgentScan {
         providers,
         unsupported_reason: None,
     }
+}
+
+/// 解析 Hermes 的 `custom_providers:` 列表。
+///
+/// 结构（缩进 2 的 `- name:` 开始一项）：
+///
+/// ```yaml
+/// custom_providers:
+///   - name: command
+///     base_url: https://...
+///     api_key: sk-xxx
+///     api_mode: chat_completions
+///     model: deepseek/deepseek-v4.1-flash
+///     models:
+///       deepseek/deepseek-v4.1-flash:
+///         context_length: 1000000
+///         supports_tools: true
+/// ```
+fn parse_hermes_custom_providers(block: Vec<&str>) -> Vec<FoundProvider> {
+    #[derive(Default)]
+    struct Cur {
+        id: String,
+        base: String,
+        api_key: String,
+        api_mode: String,
+        models: Vec<ModelSpec>,
+    }
+
+    let mut out: Vec<FoundProvider> = Vec::new();
+    let mut cur: Option<Cur> = None;
+    let mut cur_model: Option<ModelSpec> = None;
+
+    fn flush_model(cur: &mut Option<Cur>, m: &mut Option<ModelSpec>) {
+        if let (Some(c), Some(spec)) = (cur.as_mut(), m.take()) {
+            c.models.push(spec);
+        }
+    }
+
+    fn flush_provider(out: &mut Vec<FoundProvider>, cur: &mut Option<Cur>) {
+        let Some(c) = cur.take() else { return };
+        if c.id.is_empty() {
+            return;
+        }
+        out.push(FoundProvider {
+            id: c.id.clone(),
+            name: c.id.clone(),
+            base_url: c.base.clone(),
+            api_kind: if c.api_mode.is_empty() {
+                None
+            } else {
+                Some(ProviderKind::parse(&c.api_mode))
+            },
+            key_fp: if c.api_key.len() >= 16 {
+                fp(&c.api_key)
+            } else {
+                String::new()
+            },
+            key_len: c.api_key.len(),
+            models: c.models,
+            location: format!("config.yaml · custom_providers[{}]", c.id),
+        });
+    }
+
+    for line in block {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let t = line.trim();
+
+        // `- name: xxx` 开始一项
+        if indent == 2 && t.starts_with("- ") {
+            flush_model(&mut cur, &mut cur_model);
+            flush_provider(&mut out, &mut cur);
+            let name = t.strip_prefix("- ").unwrap_or("").trim();
+            let id = name.strip_prefix("name:").map(|v| v.trim()).unwrap_or("");
+            cur = Some(Cur {
+                id: unquote_yaml(id),
+                ..Default::default()
+            });
+            continue;
+        }
+
+        if indent == 4 {
+            flush_model(&mut cur, &mut cur_model);
+            let Some((k, v)) = t.split_once(':') else {
+                continue;
+            };
+            let k = k.trim();
+            let v = unquote_yaml(v.trim());
+            if let Some(c) = cur.as_mut() {
+                match k {
+                    "base_url" => c.base = v,
+                    "api_key" => c.api_key = v,
+                    "api_mode" => c.api_mode = v,
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
+        if indent == 6 {
+            flush_model(&mut cur, &mut cur_model);
+            if t.ends_with(':') {
+                let id = t.trim_end_matches(':').to_string();
+                let mut spec = ModelSpec::new(id);
+                spec.input_modalities = vec!["text".to_string()];
+                cur_model = Some(spec);
+            }
+            continue;
+        }
+
+        if indent >= 8 {
+            if let Some((k, v)) = t.split_once(':') {
+                let k = k.trim();
+                let v = v.trim();
+                if let Some(spec) = cur_model.as_mut() {
+                    match k {
+                        "context_length" => {
+                            spec.context_window = v.parse::<u64>().ok();
+                        }
+                        "max_tokens" => {
+                            spec.max_output_tokens = v.parse::<u64>().ok();
+                        }
+                        "supports_tools" => {
+                            spec.tool_call = Some(v == "true");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    flush_model(&mut cur, &mut cur_model);
+    flush_provider(&mut out, &mut cur);
+    out
+}
+
+/// 去掉 YAML 标量的引号。
+fn unquote_yaml(s: &str) -> String {
+    let t = s.trim();
+    if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+        return t[1..t.len() - 1]
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\");
+    }
+    if t.len() >= 2 && t.starts_with('\'') && t.ends_with('\'') {
+        return t[1..t.len() - 1].replace("''", "'");
+    }
+    t.to_string()
 }
 
 /// 从 YAML 文本里取一个顶层键的完整区段（含缩进内容，不含该键行）。
@@ -865,25 +1017,357 @@ fn find_yaml_top_block<'a>(text: &'a str, key: &str) -> Option<Vec<&'a str>> {
     Some(lines[start + 1..end].to_vec())
 }
 
-/// 解析 Hermes 的 `providers` 段。
+/// 扫描 Gemini CLI：`.env` 里的 key / 端点 / 模型。
 ///
-/// 逐行状态机：二级键（缩进 2）开一个新 provider，
-/// 三级键（缩进 4）读 provider 级字段，四级键（缩进 6）读模型字段。
-fn parse_hermes_providers(block: Vec<&str>) -> Vec<FoundProvider> {
+/// 本机未安装，按 cc-switch 的 `gemini_config.rs` 实现。
+pub fn scan_gemini() -> AgentScan {
+    let dir = home().join(".gemini");
+    let env_path = dir.join(".env");
+    let present = env_path.exists() || dir.join("settings.json").exists();
+    let mut providers = Vec::new();
+
+    if let Ok(text) = std::fs::read_to_string(&env_path) {
+        let mut key = String::new();
+        let mut base = String::new();
+        let mut model = String::new();
+        for line in text.lines() {
+            let t = line.trim();
+            let t = t.strip_prefix("export ").unwrap_or(t).trim_start();
+            if let Some((k, v)) = t.split_once('=') {
+                let v = v.trim();
+                match k.trim() {
+                    "GEMINI_API_KEY" | "GOOGLE_API_KEY" => key = v.to_string(),
+                    "GOOGLE_GEMINI_BASE_URL" => base = v.to_string(),
+                    "GEMINI_MODEL" => model = v.to_string(),
+                    _ => {}
+                }
+            }
+        }
+        if !base.is_empty() || !key.is_empty() {
+            let mut models = Vec::new();
+            if !model.is_empty() {
+                models.push(ModelSpec::new(model));
+            }
+            providers.push(FoundProvider {
+                id: "gemini".to_string(),
+                name: "Gemini CLI".to_string(),
+                base_url: base,
+                // Gemini 只有自家协议；第三方端点由它自己的 adapter 处理
+                api_kind: Some(ProviderKind::GoogleGenAi),
+                key_fp: if key.len() >= 16 {
+                    fp(&key)
+                } else {
+                    String::new()
+                },
+                key_len: key.len(),
+                models,
+                location: ".env · GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL".to_string(),
+            });
+        }
+    }
+
+    let unsupported = if present && providers.is_empty() {
+        Some("走 Google 官方登录，.env 里没有第三方端点".to_string())
+    } else {
+        None
+    };
+    AgentScan {
+        agent: "gemini".into(),
+        present,
+        providers,
+        unsupported_reason: unsupported,
+    }
+}
+
+/// 扫描 Grok Build：`config.toml` 的 `models.default` + 对应 `[model.*]` 表。
+pub fn scan_grok() -> AgentScan {
+    let path = home().join(".grok").join("config.toml");
+    let present = path.exists();
+    let mut providers = Vec::new();
+
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(doc) = text.parse::<toml_edit::DocumentMut>() {
+            let default = doc
+                .get("models")
+                .and_then(|m| m.get("default"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !default.is_empty() {
+                if let Some(t) = doc
+                    .get("model")
+                    .and_then(|t| t.as_table_like())
+                    .and_then(|t| t.get(default))
+                    .and_then(|i| i.as_table_like())
+                {
+                    let name = t.get("name").and_then(|v| v.as_str()).unwrap_or(default);
+                    let base = t.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
+                    let model = t.get("model").and_then(|v| v.as_str()).unwrap_or("");
+                    let api_key = t.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+                    let ctx = t
+                        .get("context_window")
+                        .and_then(|v| v.as_integer())
+                        .map(|v| v as u64);
+
+                    let mut spec = ModelSpec::new(model);
+                    spec.name = Some(name.to_string());
+                    spec.context_window = ctx;
+
+                    providers.push(FoundProvider {
+                        id: default.to_string(),
+                        name: name.to_string(),
+                        base_url: base.to_string(),
+                        api_kind: t
+                            .get("api_backend")
+                            .and_then(|v| v.as_str())
+                            .map(ProviderKind::parse),
+                        key_fp: if api_key.len() >= 16 {
+                            fp(api_key)
+                        } else {
+                            String::new()
+                        },
+                        key_len: api_key.len(),
+                        models: if model.is_empty() {
+                            vec![]
+                        } else {
+                            vec![spec]
+                        },
+                        location: format!("config.toml · model.\"{default}\""),
+                    });
+                }
+            }
+        }
+    }
+
+    let unsupported = if present && providers.is_empty() {
+        Some("走 xAI 官方登录，没有第三方模型表".to_string())
+    } else {
+        None
+    };
+    AgentScan {
+        agent: "grok".into(),
+        present,
+        providers,
+        unsupported_reason: unsupported,
+    }
+}
+
+/// 扫描 OpenClaw：`openclaw.json` 的 `models.providers`。
+pub fn scan_openclaw() -> AgentScan {
+    let path = home().join(".openclaw").join("openclaw.json");
+    let present = path.exists();
+    let mut providers = Vec::new();
+
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(json) = serde_json::from_str::<Value>(&text) {
+            if let Some(map) = json
+                .pointer("/models/providers")
+                .and_then(|v| v.as_object())
+            {
+                for (id, p) in map {
+                    let key = p.get("apiKey").and_then(|v| v.as_str()).unwrap_or("");
+                    let models = p
+                        .get("models")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|m| {
+                                    let mid = m.get("id").and_then(|v| v.as_str())?;
+                                    let mut spec = ModelSpec::new(mid);
+                                    spec.name = m
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from);
+                                    spec.context_window =
+                                        m.get("contextWindow").and_then(|v| v.as_u64());
+                                    spec.max_output_tokens =
+                                        m.get("maxTokens").and_then(|v| v.as_u64());
+                                    Some(spec)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    providers.push(FoundProvider {
+                        id: id.clone(),
+                        name: id.clone(),
+                        base_url: p
+                            .get("baseUrl")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        api_kind: p
+                            .get("api")
+                            .and_then(|v| v.as_str())
+                            .map(ProviderKind::parse),
+                        key_fp: if key.len() >= 16 {
+                            fp(key)
+                        } else {
+                            String::new()
+                        },
+                        key_len: key.len(),
+                        models,
+                        location: format!("openclaw.json · models.providers.{id}"),
+                    });
+                }
+            }
+        }
+    }
+
+    AgentScan {
+        agent: "openclaw".into(),
+        present,
+        providers,
+        unsupported_reason: None,
+    }
+}
+
+/// 扫描 Kimi Code：`config.toml` 的 `[providers.<id>]` + `[models.<alias>]`。
+pub fn scan_kimi() -> AgentScan {
+    let dir = if let Ok(v) = std::env::var("KIMI_CODE_HOME") {
+        let v = v.trim();
+        if v.is_empty() {
+            home().join(".kimi-code")
+        } else {
+            PathBuf::from(v)
+        }
+    } else {
+        home().join(".kimi-code")
+    };
+    let path = dir.join("config.toml");
+    let present = path.exists();
+    let mut providers = Vec::new();
+
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(doc) = text.parse::<toml_edit::DocumentMut>() {
+            // 先建 provider id → 模型列表 的索引（模型在 [models.<alias>] 下）
+            let mut by_provider: std::collections::BTreeMap<String, Vec<ModelSpec>> =
+                Default::default();
+            if let Some(models) = doc.get("models").and_then(|i| i.as_table_like()) {
+                for (alias, item) in models.iter() {
+                    let Some(t) = item.as_table_like() else {
+                        continue;
+                    };
+                    let Some(pid) = t.get("provider").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    let mid = t.get("model").and_then(|v| v.as_str()).unwrap_or(alias);
+                    let mut spec = ModelSpec::new(mid);
+                    spec.name = t
+                        .get("display_name")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    spec.context_window = t
+                        .get("max_context_size")
+                        .and_then(|v| v.as_integer())
+                        .map(|v| v as u64);
+                    by_provider
+                        .entry(pid.to_string())
+                        .or_default()
+                        .push(spec);
+                }
+            }
+
+            if let Some(tbl) = doc.get("providers").and_then(|i| i.as_table_like()) {
+                for (id, item) in tbl.iter() {
+                    let Some(t) = item.as_table_like() else {
+                        continue;
+                    };
+                    let key = t.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+                    providers.push(FoundProvider {
+                        id: id.to_string(),
+                        name: id.to_string(),
+                        base_url: t
+                            .get("base_url")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        api_kind: t
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .map(kimi_type_to_kind),
+                        key_fp: if key.len() >= 16 {
+                            fp(key)
+                        } else {
+                            String::new()
+                        },
+                        key_len: key.len(),
+                        models: by_provider.get(id).cloned().unwrap_or_default(),
+                        location: format!("config.toml · providers.{id}"),
+                    });
+                }
+            }
+        }
+    }
+
+    AgentScan {
+        agent: "kimi".into(),
+        present,
+        providers,
+        unsupported_reason: None,
+    }
+}
+
+/// Kimi 的 `type` → 本工具协议。
+fn kimi_type_to_kind(s: &str) -> ProviderKind {
+    match s {
+        "anthropic" => ProviderKind::Anthropic,
+        "openai_responses" => ProviderKind::OpenaiResponses,
+        "google-genai" | "vertexai" => ProviderKind::GoogleGenAi,
+        _ => ProviderKind::OpenaiChat,
+    }
+}
+
+/// 扫描 MiniMax Code：`config.yaml` 的 `custom_provider` 段。
+pub fn scan_minimax() -> AgentScan {
+    let dir = {
+        let mut found = None;
+        for var in ["MINIMAX_DATA_DIR", "MAVIS_DATA_DIR"] {
+            if let Ok(v) = std::env::var(var) {
+                let v = v.trim();
+                if !v.is_empty() {
+                    found = Some(PathBuf::from(v));
+                    break;
+                }
+            }
+        }
+        found.unwrap_or_else(|| home().join(".minimax"))
+    };
+    let path = dir.join("config.yaml");
+    let present = path.exists();
+    let mut providers = Vec::new();
+
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Some(block) = find_yaml_top_block(&text, "custom_provider") {
+            providers = parse_mcode_custom_providers(block);
+        }
+    }
+
+    AgentScan {
+        agent: "minimax".into(),
+        present,
+        providers,
+        unsupported_reason: None,
+    }
+}
+
+/// 解析 MCode 的 `custom_provider:` 段。
+///
+/// 这里是**字典**（二级键就是 provider id），和 Hermes 的列表不同。
+/// 只收 `kind` 为 `custom`（或缺省）的节点 —— 其它是 MCode 自己的账号。
+fn parse_mcode_custom_providers(block: Vec<&str>) -> Vec<FoundProvider> {
     #[derive(Default)]
     struct Cur {
         id: String,
         name: String,
         base: String,
+        api: String,
         api_key: String,
-        /// Hermes 的 api_mode：chat_completions / responses
-        api_mode: String,
+        kind: String,
         models: Vec<ModelSpec>,
     }
 
     let mut out: Vec<FoundProvider> = Vec::new();
     let mut cur: Option<Cur> = None;
-    // 当前在 models 下的哪个模型
     let mut cur_model: Option<ModelSpec> = None;
 
     fn flush_model(cur: &mut Option<Cur>, m: &mut Option<ModelSpec>) {
@@ -894,7 +1378,7 @@ fn parse_hermes_providers(block: Vec<&str>) -> Vec<FoundProvider> {
 
     fn flush_provider(out: &mut Vec<FoundProvider>, cur: &mut Option<Cur>) {
         let Some(c) = cur.take() else { return };
-        if c.id.is_empty() {
+        if c.id.is_empty() || (!c.kind.is_empty() && c.kind != "custom") {
             return;
         }
         out.push(FoundProvider {
@@ -904,12 +1388,11 @@ fn parse_hermes_providers(block: Vec<&str>) -> Vec<FoundProvider> {
             } else {
                 c.name.clone()
             },
-            base_url: c.base.clone(),
-            // Hermes 的 api_mode：chat_completions / responses
-            api_kind: if c.api_mode.is_empty() {
+            base_url: c.base,
+            api_kind: if c.api.is_empty() {
                 None
             } else {
-                Some(ProviderKind::parse(&c.api_mode))
+                Some(ProviderKind::parse(&c.api))
             },
             key_fp: if c.api_key.len() >= 16 {
                 fp(&c.api_key)
@@ -918,9 +1401,15 @@ fn parse_hermes_providers(block: Vec<&str>) -> Vec<FoundProvider> {
             },
             key_len: c.api_key.len(),
             models: c.models,
-            location: format!("config.yaml · providers.{}", c.id),
+            location: format!("config.yaml · custom_provider.{}", c.id),
         });
     }
+
+    // 当前所在子段：None 表示 provider 的直属字段，
+    // "options" / "models" 表示进入了对应子段。
+    // 没有这个状态就无法区分缩进 6 的 `baseURL:`（options 下）
+    // 和 `glm-5.2:`（models 下）—— 两者缩进相同。
+    let mut section: Option<&str> = None;
 
     for line in block {
         if line.trim().is_empty() || line.trim_start().starts_with('#') {
@@ -929,66 +1418,91 @@ fn parse_hermes_providers(block: Vec<&str>) -> Vec<FoundProvider> {
         let indent = line.len() - line.trim_start().len();
         let t = line.trim();
 
-        if indent == 2 {
-            // 新 provider 起点
+        // 二级键：一个 provider
+        if indent == 2 && t.ends_with(':') {
             flush_model(&mut cur, &mut cur_model);
             flush_provider(&mut out, &mut cur);
-            let id = t.trim_end_matches(':').to_string();
             cur = Some(Cur {
-                id,
+                id: t.trim_end_matches(':').to_string(),
                 ..Default::default()
             });
+            section = None;
             continue;
         }
 
+        // 三级键：name / kind / api / options / models
         if indent == 4 {
-            // provider 级字段。遇到 models: 就进入模型列表
             flush_model(&mut cur, &mut cur_model);
             let Some((k, v)) = t.split_once(':') else {
                 continue;
             };
             let k = k.trim();
-            let v = v.trim();
+            let v = unquote_yaml(v.trim());
+            match k {
+                "options" => {
+                    section = Some("options");
+                    continue;
+                }
+                "models" => {
+                    section = Some("models");
+                    continue;
+                }
+                _ => {}
+            }
             if let Some(c) = cur.as_mut() {
                 match k {
-                    "name" => c.name = v.to_string(),
-                    "base_url" => c.base = v.to_string(),
-                    "api_key" => c.api_key = v.to_string(),
-                    "api_mode" => c.api_mode = v.to_string(),
-                    // models: 下面才是模型，这里不处理
+                    "name" => c.name = v,
+                    "kind" => c.kind = v,
+                    "api" => c.api = v,
                     _ => {}
                 }
             }
             continue;
         }
 
+        // 缩进 6：看当前子段
         if indent == 6 {
-            // 模型 id 行
-            flush_model(&mut cur, &mut cur_model);
-            let id = t.trim_end_matches(':').to_string();
-            if !id.is_empty() && t.ends_with(':') {
-                let mut spec = ModelSpec::new(id);
-                spec.input_modalities = vec!["text".to_string()];
-                cur_model = Some(spec);
+            match section {
+                Some("options") => {
+                    let Some((k, v)) = t.split_once(':') else {
+                        continue;
+                    };
+                    let v = unquote_yaml(v.trim());
+                    if let Some(c) = cur.as_mut() {
+                        match k.trim() {
+                            "baseURL" => c.base = v,
+                            "apiKey" => c.api_key = v,
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+                Some("models") => {
+                    flush_model(&mut cur, &mut cur_model);
+                    if t.ends_with(':') {
+                        let mut spec = ModelSpec::new(t.trim_end_matches(':').to_string());
+                        spec.input_modalities = vec!["text".to_string()];
+                        cur_model = Some(spec);
+                    }
+                    continue;
+                }
+                _ => continue,
             }
-            continue;
         }
 
+        // 模型字段（缩进 8）与 limit 下的字段（缩进 10）
         if indent >= 8 {
-            // 模型字段
-            if let Some((k, v)) = t.split_once(':') {
-                let k = k.trim();
-                let v = v.trim();
-                if let Some(spec) = cur_model.as_mut() {
-                    match k {
-                        "context_length" => {
-                            spec.context_window = v.parse::<u64>().ok();
-                        }
-                        "supports_tools" => {
-                            spec.tool_call = Some(v == "true");
-                        }
-                        _ => {}
-                    }
+            let Some((k, v)) = t.split_once(':') else {
+                continue;
+            };
+            let v = v.trim();
+            if let Some(spec) = cur_model.as_mut() {
+                match k.trim() {
+                    "name" => spec.name = Some(unquote_yaml(v)),
+                    "reasoning" => spec.reasoning = Some(v == "true"),
+                    "context" => spec.context_window = v.parse().ok(),
+                    "output" => spec.max_output_tokens = v.parse().ok(),
+                    _ => {}
                 }
             }
         }
@@ -1010,5 +1524,10 @@ pub fn scan_all() -> Vec<AgentScan> {
         scan_workbuddy(),
         scan_dsh(),
         scan_hermes(),
+        scan_gemini(),
+        scan_grok(),
+        scan_openclaw(),
+        scan_kimi(),
+        scan_minimax(),
     ]
 }

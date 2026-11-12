@@ -1,21 +1,34 @@
 //! Codex 的 provider 注入器。
 //!
-//! ## 特殊性：key 不进配置文件
+//! ## 和 cc-switch 对齐后的行为
 //!
-//! Codex 的 `[model_providers.<id>]` 只有 `env_key` 字段存**环境变量名**，
-//! key 本身必须从进程环境读。所以这里要做两件事：
+//! Codex 一次只有一家第三方供应商生效：
 //!
-//! 1. 改 `~/.codex/config.toml`：写 provider 表 + `env_key`
-//! 2. 生成 `~/.agents/codex-env.ps1`：把 key 设进环境变量
+//! - 第三方统一写成一张表 `[model_providers.custom]`
+//! - 密钥写在表的 `experimental_bearer_token` 里（Codex 0.149 起自定义
+//!   provider 不再读 `auth.json` 里的密钥；`env_key` 仍然可用，但为了跟
+//!   cc-switch 的盘上形状一致，这里统一用 bearer token）
+//! - 顶层 `model_provider = "custom"`，`model` 取这一家的第一个模型
 //!
-//! 用户在使用 Codex 前需要 `. ~/.agents/codex-env.ps1`。
+//! ## 为什么不再生成 `~/.agents/codex-env.ps1`
 //!
-//! ## 为什么不用 experimental_bearer_token
+//! 早期实现用 `env_key` + 环境变量脚本，要求用户每次开 Codex 前
+//! `. ~/.agents/codex-env.ps1`。cc-switch 的做法是把 key 直接放进
+//! provider 表，用户不需要额外步骤。两套并存时以 bearer token 为准，
+//! 旧脚本不再由本工具维护 —— 里面的旧变量不会影响新表（表里已没有
+//! `env_key`）。
 //!
-//! 那个字段确实能直接把 key 写进 config.toml，一步到位。但：
-//! - 字段名带 `experimental`，未来可能被移除
-//! - 官方文档明确不推荐，优先 `env_key`
-//! - key 写进 TOML 会被更多工具/备份覆盖，泄露面更大
+//! ## 保留用户的东西
+//!
+//! 只改自己声明管的键：
+//!
+//! - `model_providers.custom` 整张表
+//! - 顶层 `model_provider` / `model` / `model_reasoning_effort`
+//! - 切换时清掉上一家留下的顶层兜底键（`base_url` / `wire_api` /
+//!   `experimental_bearer_token` / `disable_response_storage`）
+//!
+//! `mcp_servers`、`projects`、`plugins`、`notify`、`service_tier` 等
+//! 用户键一律不动。
 //!
 //! ## TOML 写入的两个坑
 //!
@@ -23,7 +36,7 @@
 //!    一旦落到表头之后，TOML 语义上就变成那个表的字段了
 //! 2. **`toml_edit` 不保留 CRLF**，需要自己检测并恢复
 
-use super::model::{DiffAction, DiffLine, FilePlan, Provider, ProviderKind};
+use super::model::{DiffAction, DiffLine, FilePlan, Provider};
 use super::safe_write::hash_file;
 use super::Injector;
 use crate::config::contract_tilde;
@@ -31,30 +44,33 @@ use std::path::PathBuf;
 
 pub struct CodexInjector;
 
+/// 第三方统一用的表名。和 cc-switch 保持一致。
+const ROUTE_ID: &str = "custom";
+
 impl CodexInjector {
     fn config_path() -> PathBuf {
         super::store::home_dir().join(".codex").join("config.toml")
     }
 
-    fn env_script_path() -> PathBuf {
-        super::store::home_dir()
-            .join(".agents")
-            .join("codex-env.ps1")
+    fn auth_path() -> PathBuf {
+        super::store::home_dir().join(".codex").join("auth.json")
     }
 }
 
-/// 把 provider id 转成合法的环境变量名。
+/// `auth.json` 里有没有官方登录。
 ///
-/// 只保留字母数字和下划线，其余转下划线，再补 `_API_KEY` 后缀。
-fn env_var_name(id: &str) -> String {
-    let mut s: String = id
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
-        .collect();
-    if s.is_empty() {
-        s = "PROVIDER".to_string();
-    }
-    format!("{s}_API_KEY")
+/// 决定 `requires_openai_auth`：
+/// - 有登录 → `true`（Codex 才会显示账号信息、刷新 token）
+/// - 没有登录 → `false`（写成 `true` 会让 Codex 卡在登录页）
+fn login_on_disk() -> bool {
+    let path = CodexInjector::auth_path();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    json.get("tokens").map(|t| !t.is_null()).unwrap_or(false)
 }
 
 impl Injector for CodexInjector {
@@ -63,7 +79,7 @@ impl Injector for CodexInjector {
     }
 
     fn targets(&self) -> Vec<PathBuf> {
-        vec![Self::config_path(), Self::env_script_path()]
+        vec![Self::config_path()]
     }
 
     fn plan(&self, providers: &[Provider]) -> anyhow::Result<Vec<FilePlan>> {
@@ -72,18 +88,19 @@ impl Injector for CodexInjector {
             return Ok(Vec::new());
         }
 
-        let wanted: Vec<&Provider> = providers
-            .iter()
-            .filter(|p| p.agents.iter().any(|a| a == "codex"))
-            .collect();
-
         // 母版为空时什么都不做，避免把空母版理解成"清空"
         if providers.is_empty() {
             return Ok(Vec::new());
         }
 
-        // 取消分配的：从 model_providers 表和 env 脚本里都摘掉。
-        // 按 id 匹配 —— Codex 的表键就是母版 id。
+        // 单槽位：只取第一个声明注入 codex 的 provider。
+        // 界面上的矩阵会保证只有一个（single_slot），这里再兜一层。
+        let wanted = providers
+            .iter()
+            .find(|p| p.agents.iter().any(|a| a == "codex"));
+
+        // 母版里有、但没分配给 codex 的：如果是我们以前按 id 写进去的表，
+        // 要清掉；顶层 model_provider 指向它时一起清。
         let unassigned: Vec<&Provider> = providers
             .iter()
             .filter(|p| !p.agents.iter().any(|a| a == "codex"))
@@ -106,146 +123,102 @@ impl Injector for CodexInjector {
         let mut summary = Vec::new();
         let mut changed = false;
 
-        // 确保 model_providers 表存在。
-        // **只在有东西要写的时候建** —— 一个 provider 都没分配给 codex 时
-        // 凭空插一个空表会把文件的 hash 改掉，让"无改动"变成"写入"。
-        if !doc.contains_key("model_providers") {
-            if wanted.is_empty() {
-                // 没事可做：不建表、不写 env 脚本
-                return Ok(Vec::new());
-            }
-            doc["model_providers"] = toml_edit::Item::Table(toml_edit::Table::new());
-            changed = true;
-        }
-
-        let providers_tbl = doc["model_providers"]
-            .as_table_mut()
-            .ok_or_else(|| anyhow::anyhow!("{} 的 model_providers 不是表", cfg_path.display()))?;
-
-        // 先移除未分配的 provider 表
-        for p in &unassigned {
-            if providers_tbl.remove(&p.id).is_some() {
-                summary.push(format!("移除 provider 表 {}（未分配给 codex）", p.id));
+        // ---- 清理旧形态：早期实现按母版 id 建的表 ----
+        //
+        // 判定标准：表名是母版里出现过的 provider id，且不是 `custom`。
+        // 这类表只可能是旧版本工具写的（用户自己起的 id 不会和母版撞名）。
+        // 不清的话，`[model_providers.command]` 会一直带着旧的
+        // `env_key = "COMMAND_API_KEY"` 留在文件里，和新的 custom 表并存。
+        if let Some(tables) = doc.get_mut("model_providers").and_then(|i| i.as_table_mut()) {
+            let doomed: Vec<String> = tables
+                .iter()
+                .filter(|(id, _)| {
+                    *id != ROUTE_ID && providers.iter().any(|p| p.id.as_str() == *id)
+                })
+                .map(|(id, _)| id.to_string())
+                .collect();
+            for id in doomed {
+                tables.remove(&id);
+                summary.push(format!("移除旧 provider 表 {id}（单槽位已统一到 {ROUTE_ID}）"));
                 changed = true;
             }
         }
 
-        for p in &wanted {
-            let env_name = env_var_name(&p.id);
-
-            let is_new = !providers_tbl.contains_key(&p.id);
-
-            if is_new {
-                let mut t = toml_edit::Table::new();
-                t["name"] = toml_edit::value(p.name.clone());
-                t["base_url"] = toml_edit::value(p.base_url.clone());
-                t["env_key"] = toml_edit::value(env_name.clone());
-
-                // wire_api：现版本 Codex 只接受 "responses"。
-                // 如果母版里标的是别的协议，写 responses 的同时在 summary 里警告 ——
-                // 静默写会让用户以为配置对了但实际请求格式不匹配。
-                let wire = match p.kind_for("codex") {
-                    ProviderKind::OpenaiResponses | ProviderKind::OpenaiChat => "responses",
-                    ProviderKind::Anthropic | ProviderKind::GoogleGenAi => "responses",
-                };
-                t["wire_api"] = toml_edit::value(wire);
-                t["requires_openai_auth"] = toml_edit::value(false);
-
-                // 非 responses 协议给个明确提示
-                if !matches!(p.kind_for("codex"), ProviderKind::OpenaiResponses) {
-                    summary.push(format!(
-                        "{} 的协议是 {}，但 Codex 只支持 responses，已强制写成 responses",
-                        p.id,
-                        p.kind_for("codex").label()
-                    ));
-                }
-
-                providers_tbl.insert(&p.id, toml_edit::Item::Table(t));
-                summary.push(format!("新增 provider 表 {} (env_key={env_name})", p.id));
-                changed = true;
-            } else {
-                // 已存在：只改 name / base_url / env_key，
-                // 其他字段（retries / headers 等）不动
-                if let Some(t) = providers_tbl.get_mut(&p.id).and_then(|v| v.as_table_mut()) {
-                    let mut local_changed = false;
-
-                    let old_name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    if old_name != p.name {
-                        t["name"] = toml_edit::value(p.name.clone());
-                        local_changed = true;
-                    }
-                    let old_base = t.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
-                    if old_base != p.base_url {
-                        t["base_url"] = toml_edit::value(p.base_url.clone());
-                        local_changed = true;
-                    }
-                    let old_env = t.get("env_key").and_then(|v| v.as_str()).unwrap_or("");
-                    if old_env != env_name {
-                        t["env_key"] = toml_edit::value(env_name.clone());
-                        local_changed = true;
-                    }
-
-                    if local_changed {
-                        summary.push(format!("更新 provider 表 {}", p.id));
-                        changed = true;
-                    } else {
-                        summary.push(format!("provider 表 {} 已是最新", p.id));
-                    }
-                }
-            }
-        }
-
-        // model_provider 指向第一个声明的 provider。
-        // 注意 toml_edit 的根表赋值会把它放在文件顶部区域，
-        // 但如果原文件里已经有这个键在表头之后（用户写错），
-        // 需要先删再插入到正确位置。
-        if let Some(first) = wanted.first() {
-            let desired = first.id.clone();
-            let current = doc
-                .get("model_provider")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if current != desired {
-                doc["model_provider"] = toml_edit::value(desired.clone());
-                changed = true;
-                summary.push(format!("model_provider → {desired}"));
-            }
-
-            // 模型：取第一个，并写推理档位
-            if let Some(model) = first.models.first() {
-                let cur_model = doc.get("model").and_then(|v| v.as_str()).unwrap_or("");
-                if cur_model != model.id {
-                    doc["model"] = toml_edit::value(model.id.clone());
+        match wanted {
+            Some(p) => {
+                // 顶层选路
+                if doc.get("model_provider").and_then(|v| v.as_str()) != Some(ROUTE_ID) {
+                    doc["model_provider"] = toml_edit::value(ROUTE_ID);
                     changed = true;
-                    summary.push(format!("model → {}", model.id));
+                    summary.push(format!("model_provider → {ROUTE_ID}"));
                 }
 
-                // 重构前不写推理档位。母版填了才写，没填保持原值
-                if let Some(effort) = &model.default_effort {
-                    let cur_effort = doc
-                        .get("model_reasoning_effort")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if cur_effort != effort {
-                        doc["model_reasoning_effort"] = toml_edit::value(effort.clone());
+                // 模型：取第一个，并写推理档位
+                if let Some(model) = p.models.first() {
+                    let cur = doc.get("model").and_then(|v| v.as_str()).unwrap_or("");
+                    if cur != model.id {
+                        doc["model"] = toml_edit::value(model.id.clone());
                         changed = true;
-                        summary.push(format!("model_reasoning_effort → {effort}"));
+                        summary.push(format!("model → {}", model.id));
+                    }
+                    if let Some(effort) = &model.default_effort {
+                        let cur = doc
+                            .get("model_reasoning_effort")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if cur != effort {
+                            doc["model_reasoning_effort"] = toml_edit::value(effort.clone());
+                            changed = true;
+                            summary.push(format!("model_reasoning_effort → {effort}"));
+                        }
+                    }
+                }
+
+                // `[model_providers.custom]`
+                let table_changed = write_custom_table(&mut doc, p, &mut summary)?;
+                changed |= table_changed;
+
+                // 上一家留下的顶层兜底键：一并清掉，否则 Codex 可能走错端点
+                for key in [
+                    "base_url",
+                    "wire_api",
+                    "experimental_bearer_token",
+                    "disable_response_storage",
+                ] {
+                    if doc.remove(key).is_some() {
+                        changed = true;
+                        summary.push(format!("清除顶层遗留 {key}"));
                     }
                 }
             }
-        } else {
-            // 一个都没分配给 codex：如果 model_provider 指向的正是被我们
-            // 刚刚移除的那张表，得一起清掉，否则 Codex 启动会报找不到 provider
-            let current = doc
-                .get("model_provider")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if unassigned.iter().any(|p| p.id == current) {
-                doc.remove("model_provider");
-                changed = true;
-                summary.push(format!("清除 model_provider（{current} 已取消分配）"));
+            None => {
+                // 一个都没分配给 codex：把 model_provider 指向我们那张表时清掉，
+                // 否则 Codex 启动会报找不到 provider。
+                let current = doc
+                    .get("model_provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let ours = current == ROUTE_ID
+                    || unassigned.iter().any(|p| p.id == current);
+                if ours {
+                    if doc.remove("model_provider").is_some() {
+                        changed = true;
+                        summary.push(format!("清除 model_provider（{current} 已取消分配）"));
+                    }
+                }
+                // 我们那张表里不再留真实 key
+                if let Some(t) = doc
+                    .get_mut("model_providers")
+                    .and_then(|i| i.as_table_mut())
+                    .and_then(|t| t.get_mut(ROUTE_ID))
+                    .and_then(|i| i.as_table_mut())
+                {
+                    if t.remove("experimental_bearer_token").is_some() {
+                        changed = true;
+                        summary.push("移除 custom 表里的旧密钥".to_string());
+                    }
+                }
             }
         }
 
@@ -265,8 +238,11 @@ impl Injector for CodexInjector {
         }
 
         let content = if changed { content } else { orig };
+        if !changed {
+            summary.push("已是最新".to_string());
+        }
 
-        let mut plans = vec![FilePlan {
+        Ok(vec![FilePlan {
             path: contract_tilde(&cfg_path),
             agent: "codex".to_string(),
             content,
@@ -274,106 +250,133 @@ impl Injector for CodexInjector {
             post_hash: String::new(),
             changed,
             summary,
-        }];
-
-        // ---- 生成环境变量脚本 ----
-        //
-        // 没有 provider 分配给 codex 时，脚本要么不建（首次），
-        // 要么清成只有注释（用户刚取消全部）。清空是必要的：
-        // 留着旧的 `$env:XXX_API_KEY` 会让 Codex 拿一把已经不该用的 key 去连。
-        let script_path = Self::env_script_path();
-        if wanted.is_empty() && !script_path.exists() {
-            return Ok(plans);
-        }
-        let script_orig = if script_path.exists() {
-            std::fs::read_to_string(&script_path)?
-        } else {
-            String::new()
-        };
-        let script_pre = hash_file(&script_path)?;
-
-        let mut script = String::from(
-            "# 由 agentcenter 生成，请勿手动编辑\n\
-             # 使用 Codex 前在 PowerShell 里执行： . ~/.agents/codex-env.ps1\n\
-             # 或者在 个人资料 里加上这一行\n\n",
-        );
-        for p in &wanted {
-            // PowerShell 单引号字符串里，单引号要写成两个
-            let escaped = p.api_key.replace('\'', "''");
-            script.push_str(&format!(
-                "$env:{} = '{}'\n",
-                env_var_name(&p.id),
-                escaped
-            ));
-        }
-
-        let script_changed = script != script_orig;
-        plans.push(FilePlan {
-            path: contract_tilde(&script_path),
-            agent: "codex".to_string(),
-            content: script,
-            pre_hash: script_pre,
-            post_hash: String::new(),
-            changed: script_changed,
-            summary: vec![if script_changed {
-                format!("生成 {} 个环境变量", wanted.len())
-            } else {
-                "环境变量脚本已是最新".to_string()
-            }],
-        });
-
-        Ok(plans)
+        }])
     }
 
     fn diff(&self, providers: &[Provider]) -> anyhow::Result<Vec<DiffLine>> {
         let plans = self.plan(providers)?;
-        let wanted: Vec<&Provider> = providers
+        let wanted = providers
             .iter()
-            .filter(|p| p.agents.iter().any(|a| a == "codex"))
-            .collect();
+            .find(|p| p.agents.iter().any(|a| a == "codex"));
 
-        let mut out = Vec::new();
-        for plan in &plans {
-            if plan.path.ends_with("codex-env.ps1") {
-                out.push(DiffLine {
-                    agent: "codex".to_string(),
-                    path: plan.path.clone(),
-                    action: if plan.changed {
-                        DiffAction::Update
-                    } else {
-                        DiffAction::Unchanged
-                    },
-                    target: "env-script".to_string(),
-                    detail: plan.summary.first().cloned().unwrap_or_default(),
-                });
-                continue;
-            }
-
-            for p in &wanted {
-                let detail = plan
-                    .summary
-                    .iter()
-                    .find(|s| s.contains(&p.id))
-                    .cloned()
-                    .unwrap_or_else(|| "无变化".to_string());
-
-                let action = if detail.starts_with("新增") {
-                    DiffAction::Add
-                } else if detail.starts_with("更新") {
-                    DiffAction::Update
-                } else {
+        Ok(plans
+            .into_iter()
+            .map(|plan| {
+                let action = if !plan.changed {
                     DiffAction::Unchanged
+                } else {
+                    DiffAction::Update
                 };
-
-                out.push(DiffLine {
+                let target = wanted.map(|p| p.id.clone()).unwrap_or_else(|| "（已取消分配）".into());
+                let detail = if plan.changed {
+                    plan.summary.first().cloned().unwrap_or_default()
+                } else {
+                    "已一致".to_string()
+                };
+                DiffLine {
                     agent: "codex".to_string(),
                     path: plan.path.clone(),
                     action,
-                    target: p.id.clone(),
+                    target,
                     detail,
-                });
-            }
-        }
-        Ok(out)
+                }
+            })
+            .collect())
     }
+}
+
+/// 写 `[model_providers.custom]`。已存在时只改本工具声明管的键，
+/// 表里的 `http_headers`、`query_params` 等用户键保留。
+fn write_custom_table(
+    doc: &mut toml_edit::DocumentMut,
+    p: &Provider,
+    summary: &mut Vec<String>,
+) -> anyhow::Result<bool> {
+    if !doc.contains_key("model_providers") {
+        doc["model_providers"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let providers = doc["model_providers"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("model_providers 不是表"))?;
+
+    let mut changed = false;
+    if !providers.contains_key(ROUTE_ID) {
+        providers.insert(ROUTE_ID, toml_edit::Item::Table(toml_edit::Table::new()));
+        changed = true;
+    }
+    let t = providers
+        .get_mut(ROUTE_ID)
+        .and_then(|i| i.as_table_mut())
+        .ok_or_else(|| anyhow::anyhow!("model_providers.custom 不是表"))?;
+
+    // 表里的键全部归本工具管：这是第三方路由表，不是用户表。
+    // 但 `http_headers` / `query_params` 这类鉴权/路由扩展如果存在，
+    // 保留它们 —— 用户可能给上游加了自定义头。
+    for (key, value) in [
+        ("name", p.name.clone()),
+        ("base_url", p.base_url.clone()),
+    ] {
+        if t.get(key).and_then(|v| v.as_str()) != Some(value.as_str()) {
+            t[key] = toml_edit::value(value);
+            changed = true;
+        }
+    }
+
+    // wire_api 只接受 responses。母版标了别的协议也强制写，
+    // 但给出警告 —— 静默改写会让用户以为请求格式对上了。
+    if t.get("wire_api").and_then(|v| v.as_str()) != Some("responses") {
+        t["wire_api"] = toml_edit::value("responses");
+        changed = true;
+    }
+    if p.kind_for("codex") != super::model::ProviderKind::OpenaiResponses
+        && p.has_agent_kind("codex")
+    {
+        summary.push(format!(
+            "{} 在 codex 下标的是 {}，但 Codex 只支持 responses，已强制写成 responses",
+            p.id,
+            p.kind_for("codex").label()
+        ));
+    }
+
+    // 密钥内联。cc-switch 的盘上形状；Codex 0.149 起自定义 provider
+    // 不再从 auth.json 读 key。
+    if t.get("experimental_bearer_token").and_then(|v| v.as_str()) != Some(p.api_key.as_str()) {
+        t["experimental_bearer_token"] = toml_edit::value(p.api_key.clone());
+        changed = true;
+    }
+
+    // env_key 是旧形态，写 new key 时移除，避免两个凭据来源并存
+    if t.remove("env_key").is_some() {
+        changed = true;
+    }
+
+    // requires_openai_auth 决定 Codex 走不走 ChatGPT 后端：
+    // - true  → 带着官方登录去请求，官方镜像 / 需要账号信息时用
+    // - false → 只用 provider 表里的 bearer token，完全绕过 ChatGPT 后端
+    //
+    // 母版给了明确值就以母版为准；没给（None）才按盘上有没有登录自动判断。
+    // 自动判断在两种场景下会选错，所以必须留手动入口：
+    // 装了 Codex 但想强制用第三方 key、或登录态还在但临时切第三方。
+    let want = p.codex_requires_openai_auth.unwrap_or_else(login_on_disk);
+    if t.get("requires_openai_auth").and_then(|v| v.as_bool()) != Some(want) {
+        t["requires_openai_auth"] = toml_edit::value(want);
+        changed = true;
+    }
+    summary.push(format!(
+        "requires_openai_auth = {want}（{}）",
+        if p.codex_requires_openai_auth.is_some() {
+            "母版指定"
+        } else if want {
+            "盘上有登录，自动"
+        } else {
+            "盘上无登录，自动"
+        }
+    ));
+
+    if changed {
+        summary.push(format!("写入 model_providers.{ROUTE_ID}（bearer token 内联）"));
+    } else {
+        summary.push(format!("model_providers.{ROUTE_ID} 已是最新"));
+    }
+    Ok(changed)
 }

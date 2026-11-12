@@ -243,11 +243,32 @@ export interface ProviderView {
   agents: string[];
   /** Claude Code 档位映射；未配置时为空对象 */
   claudeModelMap: ClaudeModelMap;
+  /**
+   * Codex 是否绕过 ChatGPT 后端（写 `requires_openai_auth`）。
+   *
+   * null 表示交给注入器按盘上登录态自动判断；true / false 是用户强制指定。
+   */
+  codexRequiresOpenaiAuth: boolean | null;
   note: string;
   /** key 长度，0 表示没配 */
   keyLen: number;
   /** key 末尾 4 位 */
   keyTail: string;
+}
+
+/**
+ * Claude Code 首次启动引导（onboarding）开关的状态。
+ *
+ * 对应 `~/.claude.json` 根上的 `hasCompletedOnboarding`。这个标记和
+ * provider 无关，是「这台机器上的 Claude Code 是否已完成引导」。
+ */
+export interface ClaudeOnboardingStatus {
+  /** 实际读写的文件路径 */
+  path: string;
+  /** Claude Code 装没装 */
+  available: boolean;
+  /** 当前是否已跳过引导 */
+  skipped: boolean;
 }
 
 /** 一条差异。 */

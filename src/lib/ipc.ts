@@ -11,6 +11,7 @@
 import type {
   BackfillReport,
   ClaudeModelMap,
+  ClaudeOnboardingStatus,
   CollectPlan,
   CredentialOverview,
   GitStatus,
@@ -145,6 +146,8 @@ export const saveProvider = (p: {
   agents: string[];
   /** 按 agent 覆盖的协议。只放和 kind 不同的那些 */
   agentKinds: Record<string, string>;
+  /** Codex 的 requires_openai_auth 覆盖值；null 表示自动判断 */
+  codexRequiresOpenaiAuth: boolean | null;
   note: string;
 }) =>
   call<RunResult>('save_provider', {
@@ -156,6 +159,7 @@ export const saveProvider = (p: {
     models: p.models,
     agents: p.agents,
     agentKinds: p.agentKinds,
+    codexRequiresOpenaiAuth: p.codexRequiresOpenaiAuth,
     note: p.note,
   });
 
@@ -193,6 +197,22 @@ export const readProvidersToml = () => call<string>('read_providers_toml');
 /** 直接写入母版 TOML（会先校验格式）。 */
 export const writeProvidersToml = (content: string) =>
   call<RunResult>('write_providers_toml', { content });
+
+/** 读 Claude Code 的首次引导状态（`~/.claude.json` 的 hasCompletedOnboarding）。 */
+export const claudeOnboardingStatus = () =>
+  call<ClaudeOnboardingStatus>('claude_onboarding_status');
+
+/** 设置或清除 Claude Code 的首次引导跳过标记。 */
+export const setClaudeOnboardingSkip = (skip: boolean) =>
+  call<RunResult>('set_claude_onboarding_skip', { skip });
+
+/**
+ * 设置某个 provider 的 Codex 后端开关，并立刻只重写 Codex 的配置。
+ *
+ * value 为 null 表示交回自动判断。
+ */
+export const setCodexRequiresOpenaiAuth = (providerId: string, value: boolean | null) =>
+  call<RunResult>('set_codex_requires_openai_auth', { providerId, value });
 
 // ---- MCP 统一管理 ----
 

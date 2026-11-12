@@ -272,6 +272,7 @@ fn list_providers_inner() -> Result<Vec<crate::types::ProviderView>, String> {
                 models: p.models,
                 agents: p.agents,
                 claude_model_map: p.claude_model_map,
+                codex_requires_openai_auth: p.codex_requires_openai_auth,
                 note: p.note,
                 key_len: p.api_key.len(),
                 key_tail: if p.api_key.len() >= 4 { tail } else { String::new() },
@@ -302,6 +303,9 @@ pub fn save_provider(
     models: Vec<crate::providers::model::ModelSpec>,
     agents: Vec<String>,
     agent_kinds: std::collections::BTreeMap<String, String>,
+    // Codex 的 requires_openai_auth 覆盖值：null 表示交给注入器自动判断。
+    // 前端每次保存都会把它原样带回，否则编辑其他字段时会把这个设置洗掉。
+    codex_requires_openai_auth: Option<bool>,
     note: String,
 ) -> Result<RunResult, String> {
     let mut list = crate::providers::store::load_or_default().map_err(|e| e.to_string())?;
@@ -329,6 +333,7 @@ pub fn save_provider(
             }
             existing.models = models;
             existing.agents = agents;
+            existing.codex_requires_openai_auth = codex_requires_openai_auth;
             // 编辑表单不改 Claude 映射；映射由分配弹窗单独写
             existing.note = note;
         }
@@ -346,6 +351,7 @@ pub fn save_provider(
                 models,
                 agents,
                 claude_model_map: crate::types::ClaudeModelMap::default(),
+                codex_requires_openai_auth,
                 note,
             });
         }
@@ -495,6 +501,87 @@ fn sync_providers_inner(dry_run: bool) -> Result<crate::types::ProviderSyncRepor
         backups: report.backups,
         log: report.log,
     })
+}
+
+/// 设置某个 provider 的 Codex 后端开关，并立刻写入 Codex 配置。
+///
+/// 单独一个命令而不是走 `save_provider`：那个要传全字段（models、
+/// agentKinds、agents…），前端为了改一个布尔值去拼整个 provider 很容易
+/// 漏字段把别的设置洗掉。
+///
+/// 只改母版里这一条的这个字段，然后只注入 codex 一家 —— 不跑全量 sync，
+/// 避免为了一个开关去重写其它 agent 的配置。
+#[tauri::command]
+pub fn set_codex_requires_openai_auth(
+    provider_id: String,
+    value: Option<bool>,
+) -> Result<RunResult, String> {
+    let mut list = crate::providers::store::load_or_default().map_err(|e| e.to_string())?;
+    let Some(target) = list.iter_mut().find(|p| p.id == provider_id) else {
+        return Ok(RunResult::failure(
+            1,
+            format!("母版里没有 provider：{provider_id}"),
+        ));
+    };
+    target.codex_requires_openai_auth = value;
+    crate::providers::store::save(&list).map_err(|e| e.to_string())?;
+
+    // 只重写 codex 一家的配置
+    let codex = crate::agents::find("codex")
+        .ok_or_else(|| "找不到 codex agent 实现".to_string())?;
+    let plans = codex.provider_plan(&list).map_err(|e| e.to_string())?;
+
+    let mut lines = Vec::new();
+    for plan in plans {
+        if !plan.changed {
+            lines.push(format!("[跳过] {} 无变化", plan.path));
+            continue;
+        }
+        let real = crate::config::expand_tilde(&plan.path);
+        match crate::providers::safe_write::safe_write(&real, &plan.content, &plan.pre_hash) {
+            Ok(_) => {
+                lines.push(format!("[写入] {}", plan.path));
+                for s in &plan.summary {
+                    lines.push(format!("       {s}"));
+                }
+            }
+            Err(e) => {
+                return Ok(RunResult::failure(1, format!("写入失败：{e}")));
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push("Codex 配置未发生变化".to_string());
+    }
+
+    Ok(RunResult::success(lines.join("\n")))
+}
+
+/// 读 Claude Code 的首次引导状态。
+///
+/// 这个开关和 provider 无关：它写的是 `~/.claude.json` 根上的
+/// `hasCompletedOnboarding`，描述「这台机器上的 Claude Code 是否已
+/// 完成引导」。所以它是独立命令，不参与 `providers sync`。
+#[tauri::command]
+pub fn claude_onboarding_status() -> Result<crate::types::ClaudeOnboardingStatus, String> {
+    crate::providers::claude_onboarding::status().map_err(|e| e.to_string())
+}
+
+/// 设置或清除 Claude Code 的首次引导跳过标记。
+///
+/// 只动 `~/.claude.json` 的一个键，文件里其他内容（登录态、项目历史、
+/// MCP server）一个字节都不碰。
+#[tauri::command]
+pub fn set_claude_onboarding_skip(skip: bool) -> Result<RunResult, String> {
+    match crate::providers::claude_onboarding::set_skipped(skip) {
+        Ok((changed, message)) => Ok(if changed {
+            RunResult::success(message)
+        } else {
+            // 没有实际改动不算失败，但把原因说清楚
+            RunResult::success(message)
+        }),
+        Err(e) => Ok(RunResult::failure(1, e.to_string())),
+    }
 }
 
 /// 读取母版的原始 TOML 文本，供界面直接编辑。
