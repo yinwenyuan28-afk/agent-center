@@ -531,17 +531,25 @@ providers assign alpha --agents claude,pi  # beta 的 claude 自动消失
 
 ## 明确的边界
 
-### 能管理的 agent（7 个）
+### 能管理的 agent（13 个）
+
+字段级细节见 [provider-config-keys.md](provider-config-keys.md)。这里只列概览。
 
 | agent | provider 配置位置 | key 位置 | 多 provider 并存 |
 |---|---|---|---|
-| ZCode | `~/.zcode/v2/config.json` 的 `provider` map | 同文件 `options.apiKey` | 支持 |
-| Pi | `~/.pi/agent/models.json` | `~/.pi/agent/auth.json` | 支持 |
-| opencode | `~/.config/opencode/opencode.json` | `~/.local/share/opencode/auth.json` | 支持 |
-| Codex | `~/.codex/config.toml` 的 `model_providers` | **环境变量**（`env_key` 引用） | 支持 |
+| ZCode | `~/.zcode/v2/config.json` + `provider_config.json` | 同文件 `options.apiKey` | 支持 |
+| Pi | `~/.pi/agent/models.json` | 同文件 `providers.<id>.apiKey` | 支持 |
+| opencode | `~/.config/opencode/opencode.jsonc`（没有则 `.json`） | 条目内 `options.apiKey` / `settings.apiKey` | 支持 |
+| Codex | `~/.codex/config.toml` 的 `[model_providers.custom]` | 表内 `experimental_bearer_token` | **不支持**，只有单槽位 |
 | **WorkBuddy** | `~/.workbuddy/models.json`（扁平数组） | 同文件 `apiKey` | 支持 |
-| **DSH** | `~/.dsh/profiles/desktop/cordis.patch.yml` | `~/.dsh/.credentials.yaml` 的 `refs` | 支持 |
+| **DSH** | `~/.dsh/profiles/{web,desktop,headless,acp}/cordis.patch.yml` | `~/.dsh/.credentials.yaml` 的 `refs` | 支持 |
+| **Hermes** | `$HERMES_HOME/config.yaml` 的 `custom_providers` 列表 | 同文件 `api_key` | 支持 |
 | Claude Code | `~/.claude/settings.json` 的 `env` | 同文件 `ANTHROPIC_AUTH_TOKEN` | **不支持**，只有单槽位 |
+| Gemini CLI | `~/.gemini/.env` + `settings.json` | `.env` 的 `GEMINI_API_KEY` | **不支持**，只有单槽位；本机未安装 |
+| Grok Build | `~/.grok/config.toml` 的 `[model."..."]` | 表内 `api_key` | **不支持**，只有单槽位；本机未安装 |
+| OpenClaw | `~/.openclaw/openclaw.json` 的 `models.providers` | 同节点 `apiKey` | 支持；本机未安装 |
+| Kimi Code | `~/.kimi-code/config.toml` 的 `[providers.<id>]` | 同表 `api_key` | 支持；本机未安装 |
+| MiniMax Code | `~/.minimax/config.yaml` 的 `custom_provider` | 同节点 `options.apiKey` | 支持；本机未安装 |
 
 ### 管不了的 agent（明确记录）
 
@@ -549,10 +557,9 @@ providers assign alpha --agents claude,pi  # beta 的 claude 自动消失
 |---|---|---|
 | **Qoder** | `~/.qoder/settings.json` 只有 `model.preferences`（`qfmodel` 是它自家模型名），`security.auth.selectedType: "qoder-browser"` 说明走浏览器 OAuth。无 provider 定义、无明文 key | **不支持自动管理**，需在 Qoder 界面里配置 |
 | **Qoder CN** | 本机未安装，同 Qoder 架构 | 同上 |
-| **Hermes** | `~/.hermes` 目录为空，未配置任何 provider | **暂不支持**。目录结构已知（`memories/`、`skills/`），但本机没有可参照的 provider 配置样本，不做猜测实现 |
 | **WorkBuddy AI 版** | `~/.workbuddy-ai` 不存在 | 未安装，未验证 |
 | **Trae CN** | `~/.trae-cn` 不存在 | 未安装，未验证 |
-| **Gemini CLI** | `~/.gemini` 不存在 | 未安装。它用 `~/.gemini/settings.json` + OAuth，可参照 opencode 的模式后续加 |
+| **Claude Desktop** | 本机 `%LOCALAPPDATA%\Claude-3p` 不存在。它的配置在 `configLibrary/<profile id>.json`，结构已知（见 provider-config-keys.md），但没实测 | 未做注入器 |
 | **Cursor** | 密钥存系统凭据库，不在配置文件 | **不支持**，需在 Cursor 设置里配置 |
 
 ### 不做的操作
@@ -565,7 +572,9 @@ providers assign alpha --agents claude,pi  # beta 的 claude 自动消失
 
 - 同步前退出 ZCode / Pi / opencode（它们运行时会用内存态覆盖文件）
 - `providers.toml` 加进 `.gitignore`（工具会自动检查提示）
-- Codex 使用前 `. ~/.agents/codex-env.ps1`
+
+> Codex 不再需要加载环境变量脚本。早期版本用 `env_key` + `~/.agents/codex-env.ps1`，现已改成
+> `[model_providers.custom]` 表内 `experimental_bearer_token` 内联，和 cc-switch 一致。
 
 ---
 
@@ -580,7 +589,18 @@ providers assign alpha --agents claude,pi  # beta 的 claude 自动消失
 | `openai-responses` | openai-compatible | openai-responses | responses | openai-compatible | openai-responses | `useCustomProtocol: true` |
 | `google-generative-ai` | openai-compatible | google-generative-ai | 强制 responses ⚠ | openai-compatible | google-generative-ai | 标准 |
 
+另外四个工具的词表（都是按 cc-switch 核过的）：
+
+| 本工具 | Hermes `api_mode` | Kimi `type` | Grok `api_backend` | MiniMax `api` |
+|---|---|---|---|---|
+| `anthropic` | anthropic_messages | anthropic | chat_completions | anthropic-messages |
+| `openai-chat` | chat_completions | openai | chat_completions | openai-completions |
+| `openai-responses` | codex_responses | openai_responses | responses | openai-responses |
+| `google-generative-ai` | chat_completions | google-genai | chat_completions | openai-completions |
+
 ⚠ **Codex 只支持 Responses 协议**。母版里标其他协议时会被强制写成 `responses`，并在同步日志里明确警告——不静默处理，否则用户会以为配置对了但请求格式不匹配。
+
+**Claude Code 的协议转换只看 `agent_kinds.claude`**，不看模型名。早期实现按「模型 id 不是 `claude-` 开头」判断，会把 MiniMax 这类 Anthropic 兼容端点错翻成 `/chat/completions`。
 
 ---
 
@@ -611,6 +631,37 @@ Claude Code 只有一组 `ANTHROPIC_*` 环境变量，同一时刻只能一个 p
 
 不这么做的话，母版里会有多条都声明注入 claude，而注入器只取第一个，
 界面上的勾选状态和实际行为就对不上了。
+
+Codex、Gemini CLI、Grok Build 也是单槽位，走**同一段**互斥逻辑
+（`matrix.rs` 里 `filter(|a| a.single_slot())`），不是各写一遍。
+
+### 单槽位 agent 的额外配置
+
+Claude Code 的四档模型映射仍在**分配页**里改 —— 它是 provider 级配置，
+改哪个 provider 的映射就在那一行点卡片正文。
+
+以下两个设置已经移到侧栏的 **Claude & Codex** 页，因为它们都不是
+provider 池的增删改：
+
+| 设置 | 位置 | 性质 |
+| --- | --- | --- |
+| Claude Code 跳过首次引导 | Claude & Codex 页 | 全局，写 `~/.claude.json` |
+| Codex 是否绕过 ChatGPT 后端 | Claude & Codex 页 | 当前分配给 Codex 的那条 provider |
+
+Codex 是单槽位，只有一条 provider 生效，所以它的后端开关放在独立页里
+比藏在分配矩阵的卡片弹窗里更好找。
+
+### Claude Code 的首次引导开关
+
+它和 provider 无关 —— 写的是 `~/.claude.json` 的 `hasCompletedOnboarding`，
+描述「这台机器上的 Claude Code 是否已完成引导」。所以在侧栏的
+**Claude & Codex** 页里，不挂在任何 provider 的分配上。
+
+- 界面：侧栏 Claude & Codex 页的勾选框
+- CLI：`agentcenter claude skip` / `restore` / `status`
+
+用第三方中转时，首次启动要求登录 Anthropic 账号是多余的；勾上就直接进主界面。
+取消勾选是**删掉那个键**，不是写 `false` —— Claude Code 只认 `true`。
 
 ### 取消分配 = 真正移除
 

@@ -135,6 +135,10 @@ agentcenter providers remove <id>
 agentcenter providers example        # 输出示例母版
 agentcenter providers doctor         # 检查 .gitignore 是否已忽略母版
 
+agentcenter claude status            # Claude Code 是否会显示首次引导
+agentcenter claude skip              # 跳过首次引导（写 ~/.claude.json 的 hasCompletedOnboarding）
+agentcenter claude restore           # 恢复首次引导（删掉那个键）
+
 agentcenter models backfill          # 从各 agent 现有配置回填模型元数据
 agentcenter models backfill --dry-run # 只看将补哪些字段
 agentcenter agents                   # 列出所有 agent 及其支持的能力
@@ -238,6 +242,14 @@ Windows 上建符号链接需要管理员权限或开发者模式；批量建 ju
 - Hermes 的配置目录优先读 `HERMES_HOME` 环境变量，取不到才用 `~/.hermes`。
   本机 `~/.hermes` 是空的（只有两个备份脚本），真正在用的是
   `C:\dev\ide\hermes-agent\Hermes Agent CN Desktop` 下的桌面版。
+- **Gemini CLI、Grok Build、OpenClaw、Kimi Code、MiniMax Code 五个注入器是按
+  cc-switch 的源码移植的，本机没装这些工具，尚未实测**。装好之后要对一遍真实文件。
+- **Claude Desktop 没有注入器**。本机 `%LOCALAPPDATA%\Claude-3p` 不存在，
+  结构虽已知但没验证，不做猜测实现。
+- **opencode 的 `.jsonc` 注释会在写入时丢失**。用 `serde_json` 读写，
+  带注释的文件会先剥注释再写回。要做保留注释的编辑需要引入 JSONC 文档层。
+- **Codex 现在写内联 `experimental_bearer_token`**，不再生成
+  `~/.agents/codex-env.ps1`。早期版本生成的这个脚本不再由工具维护。
 
 ## 目录结构
 
@@ -271,7 +283,11 @@ agentcenter/
 │   │   │   ├── hermes.rs         Hermes Agent：provider+mcp（读 HERMES_HOME）
 │   │   │   ├── cursor.rs         Cursor：mcp
 │   │   │   ├── qoder.rs          Qoder：mcp
-│   │   │   ├── gemini.rs         Gemini CLI：只有不支持声明
+│   │   │   ├── gemini.rs         Gemini CLI：provider（按 cc-switch 移植）
+│   │   │   ├── grok.rs           Grok Build：provider（按 cc-switch 移植）
+│   │   │   ├── openclaw.rs       OpenClaw：provider（按 cc-switch 移植）
+│   │   │   ├── kimi.rs           Kimi Code：provider（按 cc-switch 移植）
+│   │   │   ├── minimax.rs        MiniMax Code：provider（按 cc-switch 移植）
 │   │   │   └── ...               其余只有路径与 skills 的 agent
 │   │   └── providers/            provider 母版、注入调度、分配矩阵
 │   │       ├── mod.rs            Injector trait + 同步调度
@@ -282,12 +298,22 @@ agentcenter/
 │   │       ├── backfill.rs       把读到的元数据补回母版空字段
 │   │       ├── diff.rs           母版 vs 现状对比
 │   │       ├── matrix.rs         provider 池 × agent 分配矩阵
-│   │       ├── hermes.rs         Hermes 注入器（config.yaml 行级编辑）
-│   │       ├── zcode.rs          ZCode 注入器
-│   │       ├── pi.rs             Pi 注入器（auth.json + models.json）
-│   │       ├── opencode.rs       opencode 注入器
-│   │       ├── codex.rs          Codex 注入器（config.toml + env 脚本）
-│   │       └── claude.rs         Claude 注入器（展开 ANTHROPIC_* 组）
+│   │       ├── hermes.rs         Hermes 注入器（custom_providers 列表，行级编辑）
+│   │       ├── zcode.rs          ZCode 注入器（config.json + provider_config.json）
+│   │       ├── pi.rs             Pi 注入器（models.json，key 内联）
+│   │       ├── opencode.rs       opencode 注入器（.jsonc 优先，key 内联）
+│   │       ├── codex.rs          Codex 注入器（单槽位 custom 表 + 内联 token）
+│   │       ├── claude.rs         Claude 注入器（关键字段清单 + 代理别名）
+│   │       ├── claude_bridge.rs  本地协议转换（Messages → Chat/Responses）
+│   │       ├── claude_onboarding.rs  Claude 首次引导开关（~/.claude.json）
+│   │       ├── dsh.rs            DSH 注入器（4 个 profile + credentials）
+│   │       ├── workbuddy.rs      WorkBuddy 注入器（扁平模型数组）
+│   │       ├── gemini.rs         Gemini CLI 注入器（.env + settings.json）
+│   │       ├── grok.rs           Grok Build 注入器（model 表）
+│   │       ├── openclaw.rs       OpenClaw 注入器（models.providers）
+│   │       ├── kimi.rs           Kimi Code 注入器（providers + models 别名）
+│   │       ├── minimax.rs        MiniMax Code 注入器（custom_provider）
+│   │       └── injector_test.rs  关键字段边界与协议映射的单测
 │   ├── capabilities/             Tauri 2 权限声明
 │   ├── icons/                    应用图标
 │   ├── Cargo.toml
@@ -301,6 +327,7 @@ agentcenter/
 │   │   ├── Skills.svelte         中心库与标签
 │   │   ├── Store.svelte          npx skills 更新
 │   │   ├── Providers.svelte      Provider 池 + 分配
+│   │   ├── ClaudeCodex.svelte    Claude 引导开关 + Codex 后端开关
 │   │   ├── Mcp.svelte            MCP server 池 + 分配
 │   │   └── Git.svelte            版本管理
 │   └── lib/
@@ -321,6 +348,13 @@ agentcenter/
 │   ├── test-zcode-inject.mjs     ZCode 注入器测试
 │   ├── test-multi-inject.mjs     Pi / opencode 注入器测试
 │   ├── test-claude-codex.mjs     Claude / Codex 注入器测试
+│   ├── test-hermes-zcode.mjs     Hermes / ZCode 注入器与 MCP 测试
+│   ├── test-protocol-e2e.mjs     按 agent 覆盖协议的端到端测试
+│   ├── test-agent-kinds.mjs      同一 provider 不同协议
+│   ├── test-models.mjs           模型元数据下发与回填
+│   ├── test-workbuddy-dsh.mjs    WorkBuddy / DSH 注入器测试
+│   ├── test-provider-matrix.mjs  分配矩阵与移除语义
+│   ├── test-mcp-*.mjs            MCP 注入 / 矩阵 / 差异测试
 │   └── test-toml-comments.mjs    TOML 注释保留测试
 ├── plan/
 │   ├── README.md                 实施计划与验收记录

@@ -14,12 +14,12 @@
 
 而真实配置差异很大：
 
-| 来源 | 模型 | 上下文 | 输出 | 输入模态 |
-|---|---|---|---|---|
-| `~/.pi/agent/models.json` | wangxin / insigma-general-30b | 32768 | 8192 | text |
-| `~/.pi/agent/models.json` | opencode-go / muse-spark-1.2 | 1048576 | 131072 | text+image |
-| `~/.zcode/v2/config.json` | GLM-5.3 | 1000000 | 128000 | text |
-| `~/.zcode/v2/config.json` | GLM-5.3-Flash | 1000000 | 128000 | text+image+video |
+| 来源                        | 模型                            | 上下文     | 输出     | 输入模态             |
+| ------------------------- | ----------------------------- | ------- | ------ | ---------------- |
+| `~/.pi/agent/models.json` | wangxin / insigma-general-30b | 32768   | 8192   | text             |
+| `~/.pi/agent/models.json` | opencode-go / muse-spark-1.2  | 1048576 | 131072 | text+image       |
+| `~/.zcode/v2/config.json` | GLM-5.3                       | 1000000 | 128000 | text             |
+| `~/.zcode/v2/config.json` | GLM-5.3-Flash                 | 1000000 | 128000 | text+image+video |
 
 写死就把这些抹平成同一个值。
 
@@ -127,17 +127,17 @@ fn provider_plan(&self, providers: &[Provider]) -> anyhow::Result<Vec<FilePlan>>
 
 ### 调用点改造
 
-| 位置 | 改成 |
-|---|---|
-| `providers/mod.rs::sync()` | 遍历 `agents::provider_capable()` 调 `provider_plan()` |
-| `providers/matrix.rs::build()` | 列从 `agents::provider_capable()` 生成 |
-| `providers/matrix.rs::set_row()` | 用 `provider_capable()` 的 id 过滤 |
-| `providers/diff.rs::agent_config_path()` | 改用 `provider_targets()` |
-| `mcp/inject.rs::sync()` | 遍历 `agents::mcp_capable()` 调 `mcp_plan()` |
-| `mcp/matrix.rs::build()` | 同上 |
-| `mcp/diff.rs::agent_path()` | 从 `agents::find()` 取 label |
-| `credentials.rs::inspect()` | 遍历 `agents::all()` 收集 |
-| `config.rs` / `skills.rs` | 改调 `agents::all()` |
+| 位置                                       | 改成                                                  |
+| ---------------------------------------- | --------------------------------------------------- |
+| `providers/mod.rs::sync()`               | 遍历 `agents::provider_capable()` 调 `provider_plan()` |
+| `providers/matrix.rs::build()`           | 列从 `agents::provider_capable()` 生成                  |
+| `providers/matrix.rs::set_row()`         | 用 `provider_capable()` 的 id 过滤                      |
+| `providers/diff.rs::agent_config_path()` | 改用 `provider_targets()`                             |
+| `mcp/inject.rs::sync()`                  | 遍历 `agents::mcp_capable()` 调 `mcp_plan()`           |
+| `mcp/matrix.rs::build()`                 | 同上                                                  |
+| `mcp/diff.rs::agent_path()`              | 从 `agents::find()` 取 label                          |
+| `credentials.rs::inspect()`              | 遍历 `agents::all()` 收集                               |
+| `config.rs` / `skills.rs`                | 改调 `agents::all()`                                  |
 
 ## 二、模型元数据
 
@@ -187,15 +187,15 @@ pub struct ModelSpec {
 
 各注入器的合并实现：
 
-| 注入器 | 函数 | 模型标识 |
-|---|---|---|
-| ZCode | `merge_models_into` | `models` map 的键 |
-| Pi | `merge_pi_models` | `models[]` 数组里 `id` 匹配 |
-| opencode | 只合并 name | map 的键 |
-| WorkBuddy | 内联在 plan 里 | 扁平数组的 `id` |
-| DSH | `provider_yaml` | 只在新 provider 时写 |
-| Codex | 顶层 `model` + `model_reasoning_effort` | 取第一个 |
-| Claude | 三个别名环境变量 | 取前三个 |
+| 注入器       | 函数                                    | 模型标识                   |
+| --------- | ------------------------------------- | ---------------------- |
+| ZCode     | `merge_models_into`                   | `models` map 的键        |
+| Pi        | `merge_pi_models`                     | `models[]` 数组里 `id` 匹配 |
+| opencode  | 只合并 name                              | map 的键                 |
+| WorkBuddy | 内联在 plan 里                            | 扁平数组的 `id`             |
+| DSH       | `provider_yaml`                       | 只在新 provider 时写        |
+| Codex     | 顶层 `model` + `model_reasoning_effort` | 取第一个                   |
+| Claude    | 三个别名环境变量                              | 取前三个                   |
 
 ### 模型级不删
 
@@ -266,13 +266,13 @@ models[2] → HAIKU      （不足时回落到 models.last()）
 
 `scripts/test-models.mjs` — 15 项全过：
 
-| 场景 | 验证项 |
-|---|---|
-| 存量纯字符串 models 往返 | 能读、写回仍是字符串数组、没变成内联表 |
-| 带元数据的 models 读写 | 能读出来 |
-| 元数据下发 | provider 写进 pi、contextWindow/maxTokens/input 用母版值、推理档位写进 thinkingLevelMap |
-| 母版留空 | agent 里已有的 contextWindow/maxTokens **不被覆盖** |
-| backfill | 有输出、手填的 999999 被保留、第二个模型被回填 |
+| 场景               | 验证项                                                                       |
+| ---------------- | ------------------------------------------------------------------------- |
+| 存量纯字符串 models 往返 | 能读、写回仍是字符串数组、没变成内联表                                                       |
+| 带元数据的 models 读写  | 能读出来                                                                      |
+| 元数据下发            | provider 写进 pi、contextWindow/maxTokens/input 用母版值、推理档位写进 thinkingLevelMap |
+| 母版留空             | agent 里已有的 contextWindow/maxTokens **不被覆盖**                               |
+| backfill         | 有输出、手填的 999999 被保留、第二个模型被回填                                               |
 
 `scripts/test-provider-matrix.mjs` — 10 项全过（重构没改行为）
 `scripts/test-mcp-matrix.mjs` — 全部符合预期
@@ -347,11 +347,11 @@ models[2] → HAIKU      （不足时回落到 models.last()）
 用户指出「provider 管理缺少对 cursor、Hermes 的支持」「mcp 管理缺少对
 zcode、Hermes 的支持」。逐个核实后的结论：
 
-| agent | provider | MCP | 结论 |
-|---|---|---|---|
-| Hermes | ✅ `$HERMES_HOME/config.yaml` 的 `providers` | ✅ 同文件 `mcp_servers` | 两项都加上了 |
-| ZCode | ✅ 已支持 | ✅ `~/.zcode/cli/config.json` 的 `mcp.servers` | 补上了 MCP |
-| Cursor | ❌ 无端点配置 | ✅ 已支持 | provider 确实管不了 |
+| agent  | provider                                   | MCP                                          | 结论             |
+| ------ | ------------------------------------------ | -------------------------------------------- | -------------- |
+| Hermes | ✅ `$HERMES_HOME/config.yaml` 的 `providers` | ✅ 同文件 `mcp_servers`                          | 两项都加上了         |
+| ZCode  | ✅ 已支持                                      | ✅ `~/.zcode/cli/config.json` 的 `mcp.servers` | 补上了 MCP        |
+| Cursor | ❌ 无端点配置                                    | ✅ 已支持                                        | provider 确实管不了 |
 
 ### ZCode 的 MCP 位置之前判断错了
 
@@ -403,15 +403,15 @@ mcp_servers:
 
 字段映射：
 
-| 本工具 | Hermes |
-|---|---|
+| 本工具                                    | Hermes                       |
+| -------------------------------------- | ---------------------------- |
 | `anthropic` / `openai-chat` / `google` | `api_mode: chat_completions` |
-| `openai-responses` | `api_mode: responses` |
-| `transport`（固定） | `openai_chat` |
-| `ModelSpec.context_window` | `models.<id>.context_length` |
-| `ModelSpec.tool_call` | `models.<id>.supports_tools` |
-| `transport: stdio` | `command` + `args` + `env` |
-| `transport: http` / `sse` | `url` + `headers` |
+| `openai-responses`                     | `api_mode: responses`        |
+| `transport`（固定）                        | `openai_chat`                |
+| `ModelSpec.context_window`             | `models.<id>.context_length` |
+| `ModelSpec.tool_call`                  | `models.<id>.supports_tools` |
+| `transport: stdio`                     | `command` + `args` + `env`   |
+| `transport: http` / `sse`              | `url` + `headers`            |
 
 `model.provider` 只在它指向一个**已经被移除**的 provider 时才纠正 ——
 那是用户当前在用的选择，主动替用户切换是越权。
@@ -430,12 +430,12 @@ Hermes 的 `config.yaml` 有 40 行注释（安全说明、fallback 模型清单
 
 `scripts/test-hermes-zcode.mjs` — 20 项全过：
 
-| 场景 | 验证项 |
-|---|---|
+| 场景              | 验证项                                                                  |
+| --------------- | -------------------------------------------------------------------- |
 | Hermes provider | 写入、base_url、api_mode、模型、context_length、注释保留、skills 保留、原有 provider 保留 |
-| Hermes MCP | mcp_servers 段创建、stdio 写入、args 数组格式、remote url |
-| ZCode MCP | plugins 段保留、mcp.servers 两层结构、command 是字符串、args 是数组 |
-| 取消分配 | 条目移除、新 server 写入、plugins 仍保留 |
+| Hermes MCP      | mcp_servers 段创建、stdio 写入、args 数组格式、remote url                        |
+| ZCode MCP       | plugins 段保留、mcp.servers 两层结构、command 是字符串、args 是数组                   |
+| 取消分配            | 条目移除、新 server 写入、plugins 仍保留                                         |
 
 回归：`test-provider-matrix` 10 项、`test-models` 15 项、`test-mcp-matrix` 全部通过。
 
@@ -451,10 +451,10 @@ openai response 格式」。
 
 ### 实测证据
 
-| 端点 | 母版写的 | ZCode 实际 | Pi 实际 |
-|---|---|---|---|
-| `api.commandcode.ai/provider/v1` | `anthropic` | `openai-compatible` | `openai-completions` |
-| `opencode.ai/zen/go` | `openai-chat` | **`anthropic`** | **`openai-responses`** |
+| 端点                               | 母版写的          | ZCode 实际            | Pi 实际                  |
+| -------------------------------- | ------------- | ------------------- | ---------------------- |
+| `api.commandcode.ai/provider/v1` | `anthropic`   | `openai-compatible` | `openai-completions`   |
+| `opencode.ai/zen/go`             | `openai-chat` | **`anthropic`**     | **`openai-responses`** |
 
 `opencode-go` 这一行是关键证据：**同一个端点，同一份机器上，
 ZCode 用 anthropic、Pi 用 openai-responses**。协议根本不是 provider 的属性。
@@ -529,27 +529,27 @@ provider 编辑表单里，「协议」拆成两层：
 `FoundProvider` 加 `api_kind: Option<ProviderKind>`，各 agent 按自己的
 词表读：
 
-| agent | 读哪里 |
-|---|---|
-| ZCode | `provider.<id>.kind` |
-| Pi | `providers.<id>.api` |
-| opencode | `providers.<id>.package`（含 anthropic 就是 Anthropic） |
-| Codex | `model_providers.<id>.wire_api` |
-| Hermes | `providers.<id>.api_mode` |
-| DSH | `providers.<id>.api` |
-| WorkBuddy | `useCustomProtocol` 反推 |
-| Claude | 恒为 Anthropic（只有 `ANTHROPIC_*` 一套） |
+| agent     | 读哪里                                                |
+| --------- | -------------------------------------------------- |
+| ZCode     | `provider.<id>.kind`                               |
+| Pi        | `providers.<id>.api`                               |
+| opencode  | `providers.<id>.package`（含 anthropic 就是 Anthropic） |
+| Codex     | `model_providers.<id>.wire_api`                    |
+| Hermes    | `providers.<id>.api_mode`                          |
+| DSH       | `providers.<id>.api`                               |
+| WorkBuddy | `useCustomProtocol` 反推                             |
+| Claude    | 恒为 Anthropic（只有 `ANTHROPIC_*` 一套）                  |
 
 ### 测试
 
 `scripts/test-agent-kinds.mjs` — 9 项全过：
 
-| 场景 | 验证项 |
-|---|---|
-| 同一 provider 不同协议 | ZCode 拿到 anthropic、Pi 拿到 openai-responses |
-| 母版往返 | `agent_kinds` 保留 |
-| 去掉覆盖 | Pi 回到默认的 anthropic-messages |
-| 扫描回读 | backfill 报告「母版 anthropic → 实际 openai-chat」 |
+| 场景               | 验证项                                        |
+| ---------------- | ------------------------------------------ |
+| 同一 provider 不同协议 | ZCode 拿到 anthropic、Pi 拿到 openai-responses  |
+| 母版往返             | `agent_kinds` 保留                           |
+| 去掉覆盖             | Pi 回到默认的 anthropic-messages                |
+| 扫描回读             | backfill 报告「母版 anthropic → 实际 openai-chat」 |
 
 ### 顺手修的测试隔离问题
 
@@ -598,11 +598,11 @@ fn supported_kinds(&self) -> &'static [ProviderKind] {
 
 只声明受限的两个：
 
-| agent | supported_kinds | 原因 |
-|---|---|---|
-| Codex | `[OpenaiResponses]` | `wire_api` 只接受 responses，其他会被强制改写 |
-| Claude | `[Anthropic]` | 只有 `ANTHROPIC_*` 一套环境变量 |
-| 其余 13 个 | `[]`（全部） | 走 OpenAI 兼容层，四种都能表达 |
+| agent   | supported_kinds     | 原因                                |
+| ------- | ------------------- | --------------------------------- |
+| Codex   | `[OpenaiResponses]` | `wire_api` 只接受 responses，其他会被强制改写 |
+| Claude  | `[Anthropic]`       | 只有 `ANTHROPIC_*` 一套环境变量           |
+| 其余 13 个 | `[]`（全部）            | 走 OpenAI 兼容层，四种都能表达               |
 
 界面上，只有一种选择的 agent 显示成**不可编辑的文字**并标「固定」，
 不给下拉 —— 免得看着像能选：
@@ -624,10 +624,83 @@ agent，未分配的灰掉并注明「协议可以预先设好，分配后生效
 `scripts/test-protocol-e2e.mjs` — 11 项全过，验证「应用里改设置 →
 agent 配置真的变」这条完整链路：
 
-| 场景 | 验证项 |
-|---|---|
-| 不设覆盖 | ZCode/Pi/Hermes 三家都用默认协议 |
-| 只给 Pi 设 responses | Pi 变了，ZCode 和 Hermes 没变 |
-| 给 ZCode 设 openai-chat | ZCode 写成 openai-compatible |
-| CLI `--agent-kind` | 写进母版，注入后 Hermes 变 responses |
-| 给未分配的 agent 设协议 | 不写入该 agent，但母版保留设置 |
+| 场景                    | 验证项                         |
+| --------------------- | --------------------------- |
+| 不设覆盖                  | ZCode/Pi/Hermes 三家都用默认协议    |
+| 只给 Pi 设 responses     | Pi 变了，ZCode 和 Hermes 没变     |
+| 给 ZCode 设 openai-chat | ZCode 写成 openai-compatible  |
+| CLI `--agent-kind`    | 写进母版，注入后 Hermes 变 responses |
+| 给未分配的 agent 设协议       | 不写入该 agent，但母版保留设置          |
+
+---
+
+## 第五轮：按 cc-switch 逐文件核对后的修正（2026-11-12）
+
+用户要求：cc-switch 已有实现的就完全照它来；没有的自己核实本机文件。
+拉下 cc-switch `main` 的源码（`src-tauri/src/` 下每个 `*_config.rs` 与 `live/` 目录）
+逐文件对过，改掉了九处偏差。完整清单在
+[provider-config-keys.md](provider-config-keys.md) 末尾的「偏差汇总」。
+
+### 影响最大的三处
+
+**Hermes 写错了段。** 原来写 `providers:` 字典，但 v12 起这个字典归 Hermes
+自己管（Web UI 里的账号），cc-switch 明确把它当只读、写入直接拒绝。
+改成写顶层 `custom_providers:` 列表，按 `name` 匹配。
+
+`api_mode` 也从两档补成 cc-switch 的四档：
+`chat_completions` / `anthropic_messages` / `codex_responses` / `bedrock_converse`。
+原来把 Anthropic 也写成 `chat_completions`，会让 Hermes 用 OpenAI 格式请求
+Anthropic 端点。
+
+**Codex 改成单槽位。** 原来每家一张 `[model_providers.<id>]` 表 + `env_key`
++ 生成 `codex-env.ps1`。cc-switch 的做法是一次只有一家：统一写成
+`[model_providers.custom]`，密钥内联在 `experimental_bearer_token`。
+Codex 0.149 起自定义 provider 不再读 `auth.json` 的密钥，内联是唯一可靠的写法。
+
+**Pi / opencode 的 key 位置。** 原来写各自的 `auth.json`，但那是这两个工具
+自己 `/login` 的凭据文件，cc-switch 完全不碰。改成内联在 provider 条目里：
+Pi 在 `providers.<id>.apiKey`，opencode 在 `options.apiKey` / `settings.apiKey`。
+
+### 其余六处
+
+| 工具 | 修正 |
+| --- | --- |
+| opencode | 配置文件改成 `.jsonc` 优先（两个文件可能同时存在，写错等于没生效） |
+| Claude | 关键字段从 10 个 `ANTHROPIC_*` 扩成 cc-switch 的完整清单（前缀 + 点名 + 7 个协议选择器） |
+| Claude | 协议转换改成只看 `agent_kinds.claude`，不再按模型名猜 |
+| Claude | 代理模式写稳定 `claude-*` 别名，不写上游真实模型名 |
+| DSH | 从只写 `desktop` 改成写 `web` / `desktop` / 存在的 `headless` / `acp`；模型补 `maxTokens` |
+| 新增 | Gemini / Grok / OpenClaw / Kimi / MiniMax 五个注入器（按 cc-switch 移植） |
+
+### Claude 只看协议这一条，是被测试逼出来的
+
+改完关键字段清单后跑 `test-provider-matrix`，出现两个失败：
+「claude 拿到了 beta」和「claude 的 ANTHROPIC_BASE_URL 已清掉」。
+排查发现两个独立问题：
+
+1. 判断「这套配置是不是我们写的」发生在确认「有没有分配」之前，
+   于是已分配场景会先清空再写回同样的值，幂等性被破坏。
+   改成先确认无分配、再判断清理。
+2. 判断「要不要转换」按模型名走：Anthropic 协议 + 非 `claude-` 模型名 → 要转换。
+   但 MiniMax 这类 Anthropic 兼容端点的模型名本来就不是 `claude-`，
+   直连 `/v1/messages` 完全正常。改成只看协议。
+
+单测 `injector_test.rs` 把这几个边界钉住了：关键字段判定（含
+`CLAUDE_CODE_USE_POWERSHELL_TOOL` 这类不能误伤的功能开关）、
+供应商独有字段不能混进关键字段、Anthropic 永不转换、各家协议词表。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `cargo test` | 18 项全过（含新增的 `injector_test.rs`） |
+| `npm run verify` | 契约 29 类型 163 字段、svelte-check 0 error、构建通过 |
+| 13 个 `scripts/test-*.mjs` | 全部零失败 |
+| `test-claude-codex` | 21 项全过（Claude 关键字段 8 项 + Codex 单槽位 7 项 + 幂等） |
+| `test-hermes-zcode` | 20 项全过（含「providers: 字典原样保留」） |
+
+### 顺带修掉的既有问题
+
+`check-contract.mjs` 不认识字段级 `#[serde(rename = "default")]`，
+把 `ClaudeModelMap` 的 `default_model` → `default` 改名误报成三处不一致。
+这个问题在改动前的干净树上就存在（用 `git stash` 验证过）。脚本现在会读字段级 rename。
