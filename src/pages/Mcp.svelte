@@ -518,7 +518,7 @@
           <div class="flex shrink-0 items-center gap-1">
             <button
               class="rounded-[var(--radius-sm)] px-2.5 py-1 text-[11px] font-medium transition-colors {isOpen
-                ? 'bg-[var(--color-accent)] text-white'
+                ? 'bg-[var(--color-accent)] text-[var(--color-accent-text)]'
                 : 'border border-[var(--color-border-strong)] text-[var(--color-text-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]'}"
               onclick={() => (expanded = isOpen ? null : row.id)}
             >
@@ -571,7 +571,7 @@
                   class="flex items-center gap-2.5 rounded-[var(--radius-md)] border px-3 py-2.5 text-left transition-all {!col.available
                     ? 'cursor-not-allowed border-[var(--color-border)] opacity-40'
                     : on
-                      ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white shadow-sm'
+                      ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-text)] shadow-sm'
                       : 'border-[var(--color-border-strong)] bg-[var(--color-bg)] text-[var(--color-text)] hover:border-[var(--color-accent)] hover:bg-[var(--color-bg-hover)]'}"
                   disabled={!col.available || busy}
                   title={col.available ? `切换「${row.id}」在 ${col.label}` : `${col.label} 不可用`}

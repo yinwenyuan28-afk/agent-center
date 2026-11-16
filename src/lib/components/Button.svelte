@@ -2,7 +2,7 @@
   /**
    * 按钮。
    *
-   * 变体映射到 ChatGPT 那套视觉：主按钮是那个绿，其余是中性灰底或纯文字。
+   * 变体使用项目的黑白灰配色：主按钮通过主题变量自动适配浅色和深色背景。
    * 没有花哨的渐变和阴影，靠边框和底色区分层级。
    */
   import type { Snippet } from 'svelte';
@@ -38,7 +38,7 @@
   // 加新变体时只改一处。
   const variants: Record<Variant, string> = {
     default: 'bg-[var(--color-bg)] text-[var(--color-text)] border border-[var(--color-border-strong)] hover:bg-[var(--color-bg-hover)]',
-    primary: 'bg-[var(--color-accent)] text-white border border-transparent hover:bg-[var(--color-accent-hover)]',
+    primary: 'bg-[var(--color-accent)] text-[var(--color-accent-text)] border border-transparent hover:bg-[var(--color-accent-hover)]',
     ghost: 'bg-transparent text-[var(--color-text-muted)] border border-transparent hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]',
     outline: 'bg-transparent text-[var(--color-text)] border border-[var(--color-border-strong)] hover:bg-[var(--color-bg-hover)]',
     danger: 'bg-transparent text-[var(--color-danger)] border border-[var(--color-danger)] hover:bg-[var(--color-danger-bg)]',

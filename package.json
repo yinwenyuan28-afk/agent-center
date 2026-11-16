@@ -1,6 +1,6 @@
 {
   "name": "agentcenter",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "统一管理多个 AI coding agent 的全局配置：指令文件映射、skill 收集分类、第三方 skill 更新、git 版本管理",

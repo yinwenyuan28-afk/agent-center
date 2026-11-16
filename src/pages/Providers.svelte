@@ -1177,7 +1177,7 @@
                                   <button
                                     type="button"
                                     class="rounded-[var(--radius-sm)] border px-2.5 py-1.5 text-[12px] transition-colors {on
-                                      ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white'
+                                      ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-text)]'
                                       : 'border-[var(--color-border-strong)] bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)]'}"
                                     aria-pressed={on}
                                     onclick={() => toggleModality(m, 'inputModalities', mod.value)}
@@ -1206,7 +1206,7 @@
                                   <button
                                     type="button"
                                     class="rounded-[var(--radius-sm)] border px-2.5 py-1.5 font-[var(--font-mono)] text-[12px] transition-colors {on
-                                      ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white'
+                                      ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-text)]'
                                       : 'border-[var(--color-border-strong)] bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)]'}"
                                     aria-pressed={on}
                                     onclick={() => toggleEffort(m, lv)}

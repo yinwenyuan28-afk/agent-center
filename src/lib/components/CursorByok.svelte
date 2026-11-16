@@ -252,7 +252,7 @@
           type="button"
           class="flex items-center gap-1.5 rounded-[var(--radius-sm)] border px-2.5 py-1.5 text-[12px] transition-colors {plan?.noop
             ? 'border-[var(--color-border)] text-[var(--color-text-faint)]'
-            : 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white'}"
+            : 'border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-accent-text)]'}"
           disabled={busy || !providerId || byok.running || !plan || plan.noop}
           onclick={apply}
         >

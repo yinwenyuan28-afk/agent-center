@@ -13,6 +13,7 @@
    */
   import { Minus, Square, X } from '@lucide/svelte';
   import { isNative } from '../ipc';
+  import appIcon from '../../../src-tauri/icons/icon.png';
 
   let maximized = $state(false);
 
@@ -47,12 +48,12 @@
   >
     <!-- 左侧：图标 + 名称。整块都可拖拽 -->
     <div data-tauri-drag-region class="flex items-center gap-2">
-      <span
+      <img
         data-tauri-drag-region
-        class="flex h-4 w-4 items-center justify-center rounded-[3px] bg-[var(--color-accent)] text-[9px] font-bold text-white"
-      >
-        A
-      </span>
+        src={appIcon}
+        alt=""
+        class="h-5 w-5 object-contain"
+      />
       <span data-tauri-drag-region class="text-[12px] text-[var(--color-text-muted)]">
         agentcenter
       </span>
