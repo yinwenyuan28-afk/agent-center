@@ -49,11 +49,7 @@ impl Agent for Qoder {
 
     fn mcp_plan(&self, servers: &[&McpServer]) -> anyhow::Result<Vec<McpFilePlan>> {
         let owned: Vec<McpServer> = servers.iter().map(|s| (*s).clone()).collect();
-        mcp_inject::plan_servers_map(
-            &home_dir().join(".qoder").join("settings.json"),
-            "qoder",
-            &owned,
-        )
+        mcp_inject::map_agent::plan_map(&mcp_inject::map_agent::qoder(), &owned)
     }
 
     fn credential_unsupported(&self) -> Option<&'static str> {

@@ -14,15 +14,19 @@ import type {
   GitStatus,
   ManagedSkill,
   Mapping,
+  OrphanAction,
   OrphanSkill,
   RunResult,
   Skill,
+  UsageAgentStatus,
+  UsageCharts,
+  UsageRow,
 } from './types';
 
 const now = new Date().toISOString();
 
-/** 6 个指令文件的实测状态。 */
-const mappings: Mapping[] = [
+/** 8 个指令文件的实测状态。disabled 统一补 false，见下面的 mappings。 */
+const mappingsRaw: Omit<Mapping, 'disabled'>[] = [
   {
     agent: 'zcode',
     label: 'ZCode',
@@ -113,6 +117,14 @@ const mappings: Mapping[] = [
   },
 ];
 
+/**
+ * 预览模式下的映射表。
+ *
+ * 从上面的常量展开出一份可变的副本，「取消映射」和「恢复映射」才能在
+ * 浏览器里看到真实变化，而不是点了没反应。
+ */
+const mappings: Mapping[] = mappingsRaw.map((m) => ({ ...m, disabled: false }));
+
 /** 18 个 skill 的真实清单。managed 与 source 来自 .skill-lock.json。 */
 const skills: Skill[] = [
   { name: 'agent-browser', description: '浏览器自动化 CLI，用于点击、填表、截图、提取页面数据', tags: [], managed: true, source: 'vercel-labs/agent-browser', hash: '82def678', fileCount: 3, sizeBytes: 8420 },
@@ -137,14 +149,15 @@ const skills: Skill[] = [
 
 /** 散落在各 agent 目录里的 skill，照抄实测结果。 */
 const orphans: OrphanSkill[] = [
-  { name: 'analyze', location: '.config/opencode/skills', path: 'C:\\Users\\leaf\\.config\\opencode\\skills\\analyze', relation: 'unique' },
-  { name: 'context-archive', location: '.config/opencode/skills', path: 'C:\\Users\\leaf\\.config\\opencode\\skills\\context-archive', relation: 'unique' },
-  { name: 'dingtalk-req-to-spec', location: '.cursor/skills', path: 'C:\\Users\\leaf\\.cursor\\skills\\dingtalk-req-to-spec', relation: 'unique' },
-  { name: 'hardcoded-page-portal-config', location: '.cursor/skills', path: 'C:\\Users\\leaf\\.cursor\\skills\\hardcoded-page-portal-config', relation: 'unique' },
-  { name: 'portal-link-migrate', location: '.cursor/skills', path: 'C:\\Users\\leaf\\.cursor\\skills\\portal-link-migrate', relation: 'unique' },
-  { name: 'plan-execute', location: '.workbuddy/skills', path: 'C:\\Users\\leaf\\.workbuddy\\skills\\plan-execute', relation: 'identical' },
-  { name: 'agent-browser', location: '.claude/skills', path: 'C:\\Users\\leaf\\.claude\\skills\\agent-browser', relation: 'identical' },
-  { name: 'agent-browser', location: '.codebuddy/skills', path: 'C:\\Users\\leaf\\.codebuddy\\skills\\agent-browser', relation: 'identical' },
+  { name: 'analyze', location: '.config/opencode/skills', path: 'C:\\Users\\leaf\\.config\\opencode\\skills\\analyze', relation: 'unique', description: '分析代码结构并给出改进建议', fileCount: 4, sizeBytes: 12400, hash: 'a1b2c3d4' },
+  { name: 'context-archive', location: '.config/opencode/skills', path: 'C:\\Users\\leaf\\.config\\opencode\\skills\\context-archive', relation: 'unique', description: '把长对话归档成结构化笔记', fileCount: 6, sizeBytes: 18600, hash: 'b2c3d4e5' },
+  { name: 'dingtalk-req-to-spec', location: '.cursor/skills', path: 'C:\\Users\\leaf\\.cursor\\skills\\dingtalk-req-to-spec', relation: 'unique', description: '把钉钉需求消息整理成技术规格', fileCount: 11, sizeBytes: 42300, hash: 'c3d4e5f6' },
+  { name: 'hardcoded-page-portal-config', location: '.cursor/skills', path: 'C:\\Users\\leaf\\.cursor\\skills\\hardcoded-page-portal-config', relation: 'unique', description: '页面写死配置的迁移说明', fileCount: 3, sizeBytes: 9800, hash: 'd4e5f6a7' },
+  { name: 'portal-link-migrate', location: '.cursor/skills', path: 'C:\\Users\\leaf\\.cursor\\skills\\portal-link-migrate', relation: 'unique', description: '门户链接批量迁移脚本与步骤', fileCount: 7, sizeBytes: 26800, hash: 'e5f6a7b8' },
+  { name: 'plan-execute', location: '.workbuddy/skills', path: 'C:\\Users\\leaf\\.workbuddy\\skills\\plan-execute', relation: 'identical', description: '复杂开发任务先写计划再执行', fileCount: 19, sizeBytes: 48600, hash: 'b3c4d5e6' },
+  { name: 'agent-browser', location: '.claude/skills', path: 'C:\\Users\\leaf\\.claude\\skills\\agent-browser', relation: 'identical', description: '浏览器自动化 CLI，用于点击、填表、截图、提取页面数据', fileCount: 3, sizeBytes: 8420, hash: '82def678' },
+  { name: 'agent-browser', location: '.codebuddy/skills', path: 'C:\\Users\\leaf\\.codebuddy\\skills\\agent-browser', relation: 'conflict', description: '浏览器自动化 CLI（本地改过，多了自建的截图流程）', fileCount: 5, sizeBytes: 11200, hash: '9f8e7d6c' },
+  { name: 'legacy-review', location: '.gemini/skills', path: 'C:\\Users\\leaf\\.gemini\\skills\\legacy-review', relation: 'broken-link', description: '', fileCount: 0, sizeBytes: 0, hash: '' },
 ];
 
 /** 受管 skill 的 lock 信息。 */
@@ -179,7 +192,181 @@ const mockState = {
   claudeOnboardingSkipped: true,
   /** provider id → codex_requires_openai_auth */
   codexAuth: new Map<string, boolean | null>([['command', null]]),
+  /** provider id → codex_model（给 Codex 用哪个模型） */
+  codexModel: new Map<string, string | null>([['command', null]]),
+  /** 预览模式下已勾选纳入统计的 agent。真实后端存在 agentcenter.toml 里 */
+  usageEnabled: new Set<string>(['zcode']),
+  /** Cursor 自带密钥的可变状态，让预览里点「写入」看得到变化 */
+  cursorByok: {
+    useOpenaiKey: true,
+    baseUrl: 'https://api.commandcode.ai/provider/v1' as string | null,
+    /** 已加进 Cursor 模型选择器的名字 */
+    models: ['deepseek/deepseek-v4.1-flash'] as string[],
+  },
 };
+
+/**
+ * 预览模式下某个 provider 的接口地址。
+ *
+ * 只有描述真实接口的那几条返回地址，其余（演示用的假 provider）返回 null，
+ * 让 Cursor 那块报「母版里没有 provider」，和真后端取不到 provider 时一致。
+ */
+function mockCursorProviderUrl(id: string): string | null {
+  const known: Record<string, string> = {
+    command: 'https://api.commandcode.ai/provider/v1',
+    'minimax-cn': 'https://api.minimax.cn/anthropic',
+    'dsh-responses': 'https://responses.example.com/v1',
+  };
+  return known[id] ?? null;
+}
+
+/** 预览模式下的用量 agent 状态。前四个支持，其余明确标不支持。 */
+function mockUsageAgents(): UsageAgentStatus[] {
+  const supported = [
+    {
+      agent: 'claude',
+      label: 'Claude Code',
+      source: '~/.claude/projects',
+      note: '只统计 assistant 消息；报错消息（model 为 <synthetic>）不计入。原始 input 不含缓存，已折算为含缓存。',
+      records: 1,
+    },
+    {
+      agent: 'codex',
+      label: 'Codex CLI',
+      source: '~/.codex/sessions',
+      note: '只读未压缩的 rollout-*.jsonl。更早的历史是 .jsonl.zst 压缩格式，未纳入统计。',
+      records: 2,
+    },
+    {
+      agent: 'zcode',
+      label: 'ZCode',
+      source: '~/.zcode/cli/db/db.sqlite',
+      note: '数据在 model_usage 表，按模型调用逐条记录。只统计 status=completed 的记录。',
+      records: 26432,
+    },
+    {
+      agent: 'pi',
+      label: 'pi',
+      source: '~/.pi/agent/sessions',
+      note: '会话文件按项目分目录，子代理会话在子目录里。原始 input 不含缓存，已折算。',
+      records: 36163,
+    },
+    {
+      agent: 'cursor',
+      label: 'Cursor',
+      source: '~/AppData/Roaming/Cursor/User/globalStorage/state.vscdb',
+      note: '估算值。Cursor 按请求次数计费，本地不记录单次 token；这里用上下文窗口快照的相邻差值推算。输出 token 本地完全没有记录。',
+      records: 629,
+    },
+  ];
+
+  const out: UsageAgentStatus[] = supported.map((s) => ({
+    ...s,
+    supported: true,
+    enabled: mockState.usageEnabled.has(s.agent),
+    available: true,
+    error: '',
+  }));
+
+  // 其余 agent 各占一行，明确告诉用户「还没做」，而不是让它凭空消失
+  for (const agent of ['opencode', 'workbuddy', 'dsh', 'hermes', 'qoder', 'qoder-cn', 'codebuddy', 'trae-cn', 'zed', 'gemini', 'grok', 'openclaw', 'kimi', 'minimax']) {
+    out.push({
+      agent,
+      label: agent,
+      supported: false,
+      enabled: false,
+      available: false,
+      source: '',
+      note: '',
+      records: 0,
+      error: '',
+    });
+  }
+
+  return out;
+}
+
+/** 预览用的用量明细。取最近 5 天，量级对齐本机真实数据。 */
+function mockUsageRows(): UsageRow[] {
+  return [
+    { date: '2026-11-12', agent: 'zcode', model: 'deepseek/deepseek-v4.1-flash', input: 530610588, output: 1071143, calls: 1840 },
+    { date: '2026-11-12', agent: 'codex', model: 'deepseek/deepseek-v4.1-flash', input: 46536, output: 118, calls: 2 },
+    { date: '2026-11-11', agent: 'zcode', model: 'deepseek/deepseek-v4.1-flash', input: 168122499, output: 343313, calls: 573 },
+    { date: '2026-11-11', agent: 'zcode', model: 'deepseek/deepseek-v4-flash-vision-exp', input: 78973561, output: 41930, calls: 129 },
+    { date: '2026-11-11', agent: 'claude', model: 'deepseek/deepseek-v4.1-flash', input: 27390, output: 9, calls: 1 },
+    { date: '2026-11-10', agent: 'zcode', model: 'deepseek/deepseek-v4.1-flash', input: 386455966, output: 818615, calls: 1031 },
+    { date: '2026-11-10', agent: 'zcode', model: 'deepseek/deepseek-v4-flash-vision-exp', input: 12860138, output: 16213, calls: 32 },
+    { date: '2026-11-10', agent: 'pi', model: 'deepseek/deepseek-v4.1-flash', input: 140168769, output: 977666, calls: 510 },
+    { date: '2026-11-09', agent: 'zcode', model: 'deepseek/deepseek-v4.1-flash', input: 210090546, output: 927504, calls: 1070 },
+    { date: '2026-11-09', agent: 'pi', model: 'MiniMax-M3', input: 47148071, output: 270327, calls: 385 },
+  ];
+}
+
+/** 预览用的窗口下界：只保留最近 N 天的行。 */
+function mockUsageCutoff(days: number): string {
+  const d = new Date('2026-11-12T00:00:00');
+  d.setDate(d.getDate() - (days - 1));
+  return d.toISOString().slice(0, 10);
+}
+
+/** 空图表数据。没有可展示的行时用它，避免组件拿 undefined。 */
+function emptyCharts(): UsageCharts {
+  return { models: [], trend: [], shares: [], dates: [] };
+}
+
+/**
+ * 预览用的图表数据。算法与后端 `build_charts` 保持一致：
+ * 模型按总量排序、最多保留 8 个、其余合并成「其他」。
+ */
+function mockCharts(rows: UsageRow[]): UsageCharts {
+  if (rows.length === 0) return emptyCharts();
+
+  const perModel = new Map<string, number>();
+  for (const r of rows) {
+    perModel.set(r.model, (perModel.get(r.model) ?? 0) + r.input + r.output);
+  }
+  const ranked = [...perModel.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const top = new Set(ranked.slice(0, 8).map(([m]) => m));
+  const hasOther = ranked.length > 8;
+
+  const dates = [...new Set(rows.map((r) => r.date))].sort();
+
+  const points = new Map<string, number>();
+  const shares = new Map<string, { tokens: number; calls: number }>();
+  for (const r of rows) {
+    const tokens = r.input + r.output;
+    const bucket = top.has(r.model) ? r.model : hasOther ? '其他' : r.model;
+    const key = `${bucket}\u0000${r.date}`;
+    points.set(key, (points.get(key) ?? 0) + tokens);
+    const cur = shares.get(bucket) ?? { tokens: 0, calls: 0 };
+    cur.tokens += tokens;
+    cur.calls += r.calls;
+    shares.set(bucket, cur);
+  }
+
+  const total = [...shares.values()].reduce((n, s) => n + s.tokens, 0);
+  const models = [...shares.keys()].sort(
+    (a, b) => (shares.get(b)?.tokens ?? 0) - (shares.get(a)?.tokens ?? 0),
+  );
+
+  return {
+    models,
+    trend: [...points.entries()].map(([k, tokens]) => {
+      const [model, date] = k.split('\u0000');
+      return { model, date, tokens };
+    }),
+    shares: models.map((m) => {
+      const s = shares.get(m)!;
+      return {
+        model: m,
+        tokens: s.tokens,
+        percent: total > 0 ? (s.tokens * 100) / total : 0,
+        calls: s.calls,
+      };
+    }),
+    dates,
+  };
+}
 
 /** 假后端的总入口，按命令名分发。 */
 export async function handle(command: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -208,6 +395,28 @@ export async function handle(command: string, args?: Record<string, unknown>): P
 
     case 'repair_mapping':
       return ok(`[${String(args?.agent)}] 已修复`);
+
+    case 'unmap': {
+      const agent = String(args?.agent ?? '');
+      const m = mappings.find((x) => x.agent === agent);
+      if (!m) return { ok: false, exitCode: 1, output: `找不到 agent：${agent}` };
+      m.disabled = true;
+      m.actual = null;
+      m.health = 'missing';
+      m.note = '已取消，同步时跳过';
+      return ok(`[${m.label}] 已取消映射\n下次同步会跳过，点「恢复映射」可以重新建立`);
+    }
+
+    case 'remap': {
+      const agent = String(args?.agent ?? '');
+      const m = mappings.find((x) => x.agent === agent);
+      if (!m) return { ok: false, exitCode: 1, output: `找不到 agent：${agent}` };
+      m.disabled = false;
+      m.actual = 'hardlink';
+      m.health = 'ok';
+      m.note = null;
+      return ok(`[${m.label}] 已恢复映射：Hardlink — 已创建硬链接（无需权限）`);
+    }
 
     case 'read_doc':
       // 浏览器预览时的占位内容。必须明确标注这是假数据，
@@ -244,6 +453,26 @@ export async function handle(command: string, args?: Record<string, unknown>): P
         broken: orphans.filter((o) => o.relation === 'broken-link'),
       };
       return plan;
+    }
+
+    case 'apply_orphan_action': {
+      // 预览模式：只把这一条从散落清单里拿掉，磁盘什么都没动
+      const path = String(args?.path ?? '');
+      const action = String(args?.action ?? '') as OrphanAction;
+      const idx = orphans.findIndex((o) => o.path === path);
+      const name = idx >= 0 ? orphans[idx].name : path;
+      if (idx >= 0) orphans.splice(idx, 1);
+
+      const messages: Record<OrphanAction, string> = {
+        import: '已移入中心库，原位置建立 Hardlink',
+        dedupe: '已删除散落副本，原位置建立 Hardlink 指向中心库',
+        'take-orphan': '已用散落版替换中心库；旧版备份在 ~/.agents/backup/；原位置建立 Hardlink',
+        'take-shared': '已采用中心库那份，散落副本删除，原位置建立 Hardlink',
+        delete: '已删除这份散落副本',
+        'remove-link': '已删除坏链接',
+      };
+
+      return { name, path, action, ok: true, message: messages[action] ?? '已处理' };
     }
 
     case 'list_managed':
@@ -313,6 +542,7 @@ export async function handle(command: string, args?: Record<string, unknown>): P
           ],
           agents: ['claude', 'zcode', 'pi', 'codex'],
           codexRequiresOpenaiAuth: mockState.codexAuth.get('command') ?? null,
+          codexModel: mockState.codexModel.get('command') ?? null,
           claudeModelMap: {
             opus: 'deepseek/deepseek-v4.1-flash',
             sonnet: 'xiaomi/mimo-v2.5',
@@ -450,6 +680,7 @@ export async function handle(command: string, args?: Record<string, unknown>): P
             ],
             agents: ['claude', 'zcode', 'pi', 'codex'],
             codexRequiresOpenaiAuth: mockState.codexAuth.get('command') ?? null,
+            codexModel: mockState.codexModel.get('command') ?? null,
             claudeModelMap: {
               opus: 'deepseek/deepseek-v4.1-flash',
               sonnet: 'xiaomi/mimo-v2.5',
@@ -512,6 +743,77 @@ export async function handle(command: string, args?: Record<string, unknown>): P
       return ok(
         `${String(args?.providerId)} 在 ${String(args?.agent)} ${args?.on ? '已启用' : '已取消'}`,
       );
+
+    // ---- Cursor 自带密钥（预览用假数据）----
+    //
+    // 照本机真实状态摆：开关已开、地址指向 CommandCode、密钥 93 字符。
+    // 但 keyTail 是假的 —— 预览模式不能泄露真实密钥的任何片段。
+    case 'cursor_byok_status':
+      return {
+        installed: true,
+        useOpenaiKey: mockState.cursorByok.useOpenaiKey,
+        baseUrl: mockState.cursorByok.baseUrl,
+        keyLen: 93,
+        keyTail: 'x9Uv',
+        userAddedModels: [...mockState.cursorByok.models],
+        dbPath: 'C:\\Users\\leaf\\AppData\\Roaming\\Cursor\\User\\globalStorage\\state.vscdb',
+        running: false,
+      };
+
+    case 'cursor_byok_plan': {
+      const id = String(args?.providerId ?? '');
+      const want = mockCursorProviderUrl(id);
+      if (!want) throw new Error(`母版里没有 provider：${id}`);
+
+      const have = (mockState.cursorByok.baseUrl ?? '').replace(/\/+$/, '');
+      const setKey = !mockState.cursorByok.useOpenaiKey;
+      const setUrl = want !== have;
+      const wantModels = (args?.models as string[]) ?? [];
+      const addModels = wantModels.filter((m) => m.trim() && !mockState.cursorByok.models.includes(m));
+
+      const summary: string[] = [];
+      if (setKey) summary.push('打开「Use OpenAI API Key」开关（关着时自定义模型名会被拒）');
+      if (setUrl) summary.push(`接口地址 ${have || '（未设置）'} → ${want}`);
+      if (addModels.length > 0) summary.push(`加进模型选择器：${addModels.join(', ')}`);
+
+      return {
+        setUseOpenaiKey: setKey ? true : null,
+        setBaseUrl: setUrl ? want : null,
+        writeKey: false,
+        addModels,
+        removeModels: [],
+        summary,
+        noop: !setKey && !setUrl && addModels.length === 0,
+      };
+    }
+
+    case 'cursor_byok_apply': {
+      const id = String(args?.providerId ?? '');
+      const want = mockCursorProviderUrl(id);
+      if (!want) return { ok: false, exitCode: 1, output: `母版里没有 provider：${id}` };
+      mockState.cursorByok.useOpenaiKey = true;
+      mockState.cursorByok.baseUrl = want;
+      const add = ((args?.models as string[]) ?? []).filter(
+        (m) => m.trim() && !mockState.cursorByok.models.includes(m),
+      );
+      for (const m of add) mockState.cursorByok.models.push(m);
+      const lines = ['  - 已设置 useOpenAIKey = true'];
+      if (add.length > 0) lines.push(`  - 已加进模型选择器：${add.join(', ')}`);
+      return ok(`已写入 Cursor（${id}）：\n${lines.join('\n')}\n\n重启 Cursor 后生效。`);
+    }
+
+    case 'cursor_byok_remove_models': {
+      const drop = (args?.models as string[]) ?? [];
+      mockState.cursorByok.models = mockState.cursorByok.models.filter((m) => !drop.includes(m));
+      return ok(
+        `已更新 Cursor 的模型选择器：\n  - 已从模型选择器移除：${drop.join(', ')}\n\n重启 Cursor 后生效。`,
+      );
+    }
+
+    case 'cursor_byok_reset':
+      mockState.cursorByok.useOpenaiKey = false;
+      mockState.cursorByok.baseUrl = null;
+      return ok('已重置 Cursor：\n  - 关闭自带密钥，清空接口地址\n\n重启 Cursor 后回到官方模型。');
 
     case 'diff_providers':
       return {
@@ -580,6 +882,17 @@ export async function handle(command: string, args?: Record<string, unknown>): P
       const label =
         value === null ? '自动' : value ? '走 ChatGPT 后端' : '绕过 ChatGPT 后端';
       return ok(`requires_openai_auth = ${value ?? '自动'}（${label}）`);
+    }
+
+    case 'set_codex_model': {
+      const id = String(args?.providerId ?? '');
+      const model = (args?.model ?? null) as string | null;
+      mockState.codexModel.set(id, model);
+      return ok(
+        model
+          ? `model → ${model}（写入 ~/.codex/config.toml 顶层 model）`
+          : '已取消指定，回退到 models 的第一个',
+      );
     }
 
     // ---- MCP 管理（浏览器预览假数据）----
@@ -663,16 +976,29 @@ export async function handle(command: string, args?: Record<string, unknown>): P
       return ok('MCP 母版已保存');
 
     // ---- MCP 分配矩阵（浏览器预览假数据）----
+    //
+    // 列的顺序和 available 照抄真实后端在本机的输出：装了且找到配置的
+    // available=true，没装的 false（界面上那些格子不可点）。
     case 'mcp_matrix':
       return {
         columns: [
-          { agent: 'claude', label: 'Claude Code', available: true, note: '', singleSlot: true, supportedKinds: ['anthropic'] },
-          { agent: 'codex', label: 'Codex', available: true, note: '', singleSlot: false, supportedKinds: ['openai-responses'] },
-          { agent: 'cursor', label: 'Cursor', available: true, note: '', singleSlot: false, supportedKinds: [] },
+          { agent: 'claude', label: 'Claude Code', available: true, note: '', singleSlot: false, supportedKinds: [] },
+          { agent: 'codex', label: 'Codex', available: true, note: '', singleSlot: false, supportedKinds: [] },
+          { agent: 'zcode', label: 'ZCode', available: true, note: '', singleSlot: false, supportedKinds: [] },
           { agent: 'pi', label: 'pi', available: true, note: '', singleSlot: false, supportedKinds: [] },
           { agent: 'opencode', label: 'opencode', available: true, note: '', singleSlot: false, supportedKinds: [] },
-          { agent: 'qoder', label: 'Qoder', available: true, note: '', singleSlot: false, supportedKinds: [] },
           { agent: 'workbuddy', label: 'WorkBuddy', available: true, note: '', singleSlot: false, supportedKinds: [] },
+          { agent: 'dsh', label: 'DeepSeek Harness', available: true, note: '', singleSlot: false, supportedKinds: [] },
+          { agent: 'cursor', label: 'Cursor', available: true, note: '', singleSlot: false, supportedKinds: [] },
+          { agent: 'qoder', label: 'Qoder', available: true, note: '', singleSlot: false, supportedKinds: [] },
+          { agent: 'hermes', label: 'Hermes Agent', available: false, note: '', singleSlot: false, supportedKinds: [] },
+          { agent: 'gemini', label: 'Gemini CLI', available: false, note: '本机未安装', singleSlot: false, supportedKinds: [] },
+          { agent: 'grok', label: 'Grok Build', available: false, note: '本机未安装', singleSlot: false, supportedKinds: [] },
+          { agent: 'kimi', label: 'Kimi Code', available: false, note: '本机未安装', singleSlot: false, supportedKinds: [] },
+          { agent: 'minimax', label: 'MiniMax Code', available: false, note: '本机未安装', singleSlot: false, supportedKinds: [] },
+          { agent: 'copilot', label: 'GitHub Copilot CLI', available: false, note: '本机未初始化', singleSlot: false, supportedKinds: [] },
+          { agent: 'agy', label: 'Antigravity', available: false, note: '本机未安装', singleSlot: false, supportedKinds: [] },
+          { agent: 'omp', label: 'Oh My Pi', available: false, note: '本机未安装', singleSlot: false, supportedKinds: [] },
         ],
         rows: [
           {
@@ -748,7 +1074,7 @@ export async function handle(command: string, args?: Record<string, unknown>): P
           ],
         ],
         unsupported: [
-          { agent: 'cursor', reason: '密钥存在系统凭据库中，不在配置文件里' },
+          { agent: 'cursor', reason: '配置和密钥在 state.vscdb 里，密钥经 Electron safeStorage 加密，读不出明文' },
           { agent: 'qoder', reason: '使用浏览器 OAuth 登录，本地无明文 key' },
           { agent: 'workbuddy', reason: '使用浏览器 OAuth 登录，本地无明文 key' },
         ],
@@ -757,6 +1083,46 @@ export async function handle(command: string, args?: Record<string, unknown>): P
         duplicatedKeys: 2,
         providersWithMultipleKeys: 2,
       };
+
+    case 'usage_report': {
+      // 数据照抄本机真实统计结果的量级，但日期和数字做了简化：
+      // 预览模式只需要看清布局和量级，不必复现几十亿 token 的精确值。
+      // refresh 在预览里没有对应动作 —— 假后端本来就不读盘，丢掉缓存也没意义
+      const days = Number(args?.days ?? 7);
+      const enabledBoth = mockState.usageEnabled.size > 0;
+
+      if (!enabledBoth) {
+        return {
+          days,
+          agents: mockUsageAgents(),
+          rows: [],
+          charts: emptyCharts(),
+        };
+      }
+
+      const rows = mockUsageRows().filter(
+        (r) => mockState.usageEnabled.has(r.agent) && (days === 0 || r.date >= mockUsageCutoff(days)),
+      );
+      return {
+        days,
+        agents: mockUsageAgents(),
+        rows,
+        charts: mockCharts(rows),
+      };
+    }
+
+    case 'set_usage_enabled': {
+      const agent = String(args?.agent ?? '');
+      const on = args?.on === true;
+      const st = mockUsageAgents().find((a) => a.agent === agent);
+      if (!st) return { ok: false, exitCode: 1, output: `找不到 agent：${agent}` };
+      if (on && !st.supported) {
+        return { ok: false, exitCode: 1, output: `${agent} 暂不支持用量统计` };
+      }
+      if (on) mockState.usageEnabled.add(agent);
+      else mockState.usageEnabled.delete(agent);
+      return ok(`${agent} 的用量统计已${on ? '启用' : '关闭'}`);
+    }
 
     default:
       throw new Error(`未实现的命令：${command}`);

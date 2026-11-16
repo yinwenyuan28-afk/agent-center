@@ -1,4 +1,4 @@
-//! MiniMax Code（MCode）。
+﻿//! MiniMax Code（MCode）。
 //!
 //! ## provider：多 provider 并存
 //!
@@ -8,6 +8,9 @@
 //! **本机未安装**，实现是按 cc-switch 的 `mcode_config.rs` 移植的。
 
 use super::Agent;
+use crate::mcp::inject::{McpFilePlan, McpInjector};
+use crate::mcp::model::McpServer;
+use crate::mcp::scan::{self as mcp_scan, McpAgentScan};
 use crate::providers::model::{FilePlan, Provider};
 use crate::providers::scan::AgentScan;
 use std::path::PathBuf;
@@ -72,5 +75,24 @@ impl Agent for Minimax {
     fn provider_plan(&self, providers: &[Provider]) -> anyhow::Result<Vec<FilePlan>> {
         use crate::providers::Injector;
         crate::providers::minimax::MinimaxInjector.plan(providers)
+    }
+
+    // ---- MCP ----
+
+    fn supports_mcp(&self) -> bool {
+        true
+    }
+
+    fn mcp_ready(&self) -> bool {
+        crate::mcp::inject::minimax::config_path().exists()
+    }
+
+    fn mcp_scan(&self) -> Option<McpAgentScan> {
+        Some(mcp_scan::scan_minimax())
+    }
+
+    fn mcp_plan(&self, servers: &[&McpServer]) -> anyhow::Result<Vec<McpFilePlan>> {
+        let owned: Vec<McpServer> = servers.iter().map(|s| (*s).clone()).collect();
+        crate::mcp::inject::minimax::MinimaxMcpInjector.plan(&owned)
     }
 }

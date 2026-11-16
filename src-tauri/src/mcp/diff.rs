@@ -48,10 +48,15 @@ pub fn compare(master: &[McpServer], scans: &[McpAgentScan]) -> McpDiffReport {
                         diffs.push(format!("协议 {} → {}", f.transport, m.transport.as_str()));
                     }
                     if !m.is_remote() {
-                        if f.command != m.command {
+                        // Windows 上注入器会把 `npx` 包成 `cmd /c npx`。
+                        // 扫描读到的两侧可能一边包了一边没包，直接比会永远报
+                        // 「command 不同」，所以先还原到最内层再比
+                        let (fc, fa) = unwrap_cmd(&f.command, &f.args);
+                        let (mc, ma) = unwrap_cmd(&m.command, &m.args);
+                        if fc != mc {
                             diffs.push("command 不同".to_string());
                         }
-                        if f.args != m.args {
+                        if fa != ma {
                             diffs.push("args 不同".to_string());
                         }
                     } else if f.url != m.url {
@@ -124,15 +129,34 @@ pub fn compare(master: &[McpServer], scans: &[McpAgentScan]) -> McpDiffReport {
     }
 }
 
-/// 各 agent 的主配置文件路径，用于 diff 展示。
+/// 各 agent 的主配置文件路径，用于 diff 的「新增」行。
 ///
-/// 从 agent 实现里取。MCP 的文件路径藏在各注入器内部，
-/// 这里用一个静态表补齐 —— 但它只在「新增」行里用到，
-/// 已经有 server 的情况会显示扫描到的真实 location。
+/// 已有的 server 会显示扫描到的真实 location，这里只补「还没写进去」的情况。
+/// 路径必须和对应注入器的写入目标一致，否则界面会指错文件。
 fn agent_path(agent: &str) -> String {
     match agent {
         "claude" => "~/.claude.json".into(),
-        // 其余用统一格式拼，避免每加一个 agent 就要改这张表
+        "codex" => "~/.codex/config.toml".into(),
+        "opencode" => {
+            // OpenCode 是三份配置合并读、写进已经有 mcp 段的那份
+            let p = crate::mcp::inject::opencode::write_target();
+            p.display().to_string()
+        }
+        "pi" => "~/.pi/agent/mcp.json".into(),
+        "zcode" => "~/.zcode/cli/config.json · mcp.servers".into(),
+        "workbuddy" => "~/.workbuddy/connectors/default/mcp.json".into(),
+        "cursor" => "~/.cursor/mcp.json".into(),
+        "qoder" => "~/.qoder/settings.json".into(),
+        "hermes" => crate::mcp::inject::hermes::config_path().display().to_string(),
+        "dsh" => "~/.dsh/profiles/<profile>/cordis.patch.yml".into(),
+        "gemini" => "~/.gemini/settings.json".into(),
+        "grok" => "~/.grok/config.toml".into(),
+        "kimi" => "~/.kimi-code/mcp.json".into(),
+        "minimax" => "~/.minimax/mcp.json".into(),
+        "copilot" => "~/.copilot/mcp-config.json".into(),
+        "agy" => "~/.gemini/config/mcp_config.json".into(),
+        "omp" => "~/.omp/default/agent/mcp.json".into(),
+        // 新增 agent 但忘了补这张表时，至少显示它的展示名而不是内部 id
         other => match crate::agents::find(other) {
             Some(a) => {
                 let label = a.label().to_string();
@@ -141,6 +165,19 @@ fn agent_path(agent: &str) -> String {
             None => other.to_string(),
         },
     }
+}
+
+/// 把 `cmd /c npx ...` 还原成 `npx ...`。
+///
+/// 注入器在 Windows 上会给 npx / npm / node 这类命令包一层 `cmd /c`。
+/// 母版和扫描结果可能一边包了、一边没包 —— 比之前还原到同一形态。
+fn unwrap_cmd(command: &str, args: &[String]) -> (String, Vec<String>) {
+    let is_cmd = command.eq_ignore_ascii_case("cmd") || command.eq_ignore_ascii_case("cmd.exe");
+    if !is_cmd || args.len() < 2 || args[0] != "/c" {
+        return (command.to_string(), args.to_vec());
+    }
+    let inner = args[1].clone();
+    (inner, args[2..].to_vec())
 }
 
 /// 便捷入口。

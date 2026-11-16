@@ -28,6 +28,18 @@ pub enum Command {
     /// 列出所有映射
     Mappings,
 
+    /// 取消某个 agent 的映射：删掉目标链接并记下「已取消」
+    Unmap {
+        /// agent 标识，如 claude / zcode
+        agent: String,
+    },
+
+    /// 恢复某个被取消的映射：清掉标记并立刻重建链接
+    Remap {
+        /// agent 标识
+        agent: String,
+    },
+
     /// skill 相关操作
     #[command(subcommand)]
     Skills(SkillsCmd),
@@ -47,6 +59,10 @@ pub enum Command {
     /// MCP server 统一管理
     #[command(subcommand)]
     Mcp(McpCmd),
+
+    /// token 用量统计
+    #[command(subcommand)]
+    Usage(UsageCmd),
 
     /// 列出所有 agent 及其支持的能力
     Agents,
@@ -154,8 +170,7 @@ pub enum ClaudeCmd {
 
 /// MCP server 统一管理子命令。
 #[derive(Debug, Subcommand)]
-pub enum McpCmd {
-    /// 列出母版里的 MCP server
+pub enum McpCmd {    /// 列出母版里的 MCP server
     List,
 
     /// 对比母版与各 agent 现状，不写盘
@@ -174,8 +189,7 @@ pub enum McpCmd {
 
 /// provider 统一管理子命令。
 #[derive(Debug, Subcommand)]
-pub enum ProvidersCmd {
-    /// 列出母版里定义的 provider
+pub enum ProvidersCmd {    /// 列出母版里定义的 provider
     List,
 
     /// 对比母版与各 agent 现状，不写盘
@@ -214,6 +228,13 @@ pub enum ProvidersCmd {
         /// 注入到哪些 agent，逗号分隔
         #[arg(long, value_delimiter = ',')]
         agents: Vec<String>,
+        /// 分配给 Codex 时用哪个模型。必须出现在 `--models` 里。
+        ///
+        /// Codex 的模型选择器只列它自己的官方目录，自定义 provider 的模型
+        /// 进不去，所以只能靠这个值写进 config.toml 顶层的 `model`。
+        /// 不填就沿用 models 的第一个。
+        #[arg(long = "codex-model", value_name = "MODEL")]
+        codex_model: Option<String>,
     },
 
     /// 从母版里删除一条 provider
@@ -224,6 +245,15 @@ pub enum ProvidersCmd {
 
     /// 显示分配矩阵：每个 provider 用在哪些 agent 上
     Matrix,
+
+    /// Cursor 的自带密钥（BYOK）配置。
+    ///
+    /// Cursor 的配置存在 SQLite 库里，不进 `providers sync`，必须单独操作，
+    /// 而且要先把 Cursor 完全退出 —— 它开着时会用内存状态覆盖我们的写入。
+    Cursor {
+        #[command(subcommand)]
+        cmd: CursorCmd,
+    },
 
     /// 整行设置某个 provider 的分配列表（空串表示全不分配）
     Assign {
@@ -239,4 +269,86 @@ pub enum ProvidersCmd {
 
     /// 检查母版是否已被 .gitignore 忽略
     Doctor,
+}
+
+/// Cursor 的自带密钥（BYOK）子命令。
+///
+/// Cursor 的接口地址、总开关和密钥都在 `state.vscdb` 里，且密钥经
+/// Electron safeStorage 加密。这一组命令复现「在 Cursor 设置里点一遍」
+/// 那个流程：读状态 → 看还差什么 → 退出 Cursor → 写入 → 重启。
+#[derive(Debug, Subcommand)]
+pub enum CursorCmd {
+    /// 看 Cursor 当前的 BYOK 状态：开关、接口地址、密钥长度、自定义模型
+    Status,
+
+    /// 只显示要改什么，不写库
+    Plan {
+        /// provider 标识，用母版里的 base_url 和 api_key
+        provider: String,
+        /// 要加进 Cursor 模型选择器的模型名，逗号分隔。
+        /// 省略则不动模型列表
+        #[arg(long, value_delimiter = ',')]
+        models: Vec<String>,
+    },
+
+    /// 把某个 provider 写进 Cursor。要求 Cursor 已完全退出
+    Apply {
+        /// provider 标识，用母版里的 base_url 和 api_key
+        provider: String,
+        /// 要加进 Cursor 模型选择器的模型名，逗号分隔。
+        /// 省略则不动模型列表
+        #[arg(long, value_delimiter = ',')]
+        models: Vec<String>,
+        /// 即使 Cursor 在运行也继续（不推荐，可能被覆盖）
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// 从 Cursor 的模型选择器里删掉指定模型。只改这一项，不动开关/地址/密钥
+    RemoveModel {
+        /// 模型名，逗号分隔
+        #[arg(value_delimiter = ',')]
+        models: Vec<String>,
+        /// 即使 Cursor 在运行也继续（不推荐）
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// 把 Cursor 恢复成「不用自带密钥」：关开关、清地址
+    Reset,
+}
+
+/// token 用量统计子命令。
+///
+/// 默认一个 agent 都不统计，要先 `usage enable <agent>` 打开。
+#[derive(Debug, Subcommand)]
+pub enum UsageCmd {
+    /// 列出各 agent 的统计状态与启用情况
+    Status,
+
+    /// 统计 token 用量，按 天 × agent × 模型 输出
+    Report {
+        /// 统计最近多少天。0 表示全部历史
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+
+        /// 丢掉缓存，从头重算全部历史
+        ///
+        /// 平时不需要：统计是增量的，只读新增的数据。
+        /// 只有在怀疑数字不对（比如手动删改过会话文件）时才用
+        #[arg(long)]
+        refresh: bool,
+    },
+
+    /// 打开某个 agent 的用量统计
+    Enable {
+        /// agent 标识，如 zcode / pi / codex / claude
+        agent: String,
+    },
+
+    /// 关闭某个 agent 的用量统计
+    Disable {
+        /// agent 标识
+        agent: String,
+    },
 }

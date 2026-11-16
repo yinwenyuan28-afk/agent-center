@@ -2,6 +2,8 @@
 //!
 //! **全部只读**。各家的结构差异在 `plan/mcp-management.md` 里有完整表格，
 //! 这里只做解析和归一化。
+//!
+//! 一个工具对应一个扫描函数，和 `inject` 目录一一对应。
 
 use super::model::{McpServer, Transport};
 use serde::Serialize;
@@ -43,15 +45,17 @@ fn home() -> PathBuf {
 }
 
 fn read_json(p: &PathBuf) -> Option<Value> {
-    serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
+    let text = std::fs::read_to_string(p).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// 把 JSON 里的一个 server 对象解析成 [`FoundServer`]。
 ///
-/// 兼容几个变体：
+/// 兼容的变体：
 /// - `command` 可能是字符串（Claude/pi/Qoder/Codex）或数组（opencode）
 /// - `type` 各家写法不同（local/remote、streamableHttp、sse）
 /// - 启用状态有的是 `enabled`，有的是 `disabled`（取反）
+/// - Gemini 的 HTTP 用 `httpUrl` 而不是 `url`
 fn parse_server(id: &str, v: &Value, location: &str) -> FoundServer {
     let obj = v.as_object();
 
@@ -86,14 +90,28 @@ fn parse_server(id: &str, v: &Value, location: &str) -> FoundServer {
         _ => (String::new(), Vec::new()),
     };
 
-    let url = get_str("url");
+    // url：Gemini 的 HTTP 叫 httpUrl，Antigravity 的旧写法叫 serverUrl
+    let mut url = get_str("url");
+    if url.is_empty() {
+        url = get_str("httpUrl");
+    }
+    if url.is_empty() {
+        url = get_str("serverUrl");
+    }
 
-    // transport：没有 type 时按有没有 url 判断
-    let raw_type = get_str("type");
+    // transport：type 优先，其次 transport（Kimi 的 SSE 写法），最后按字段推断
+    let raw_type = {
+        let t = get_str("type");
+        if !t.is_empty() {
+            t
+        } else {
+            get_str("transport")
+        }
+    };
     let transport = if !raw_type.is_empty() {
         Transport::parse(&raw_type)
     } else if !url.is_empty() {
-        // 默认当 http（sse 已过时）
+        // 没有 type 但有 url：默认当 http（sse 已过时）
         Transport::Http
     } else {
         Transport::Stdio
@@ -134,8 +152,8 @@ fn parse_server(id: &str, v: &Value, location: &str) -> FoundServer {
     }
 }
 
-/// 通用的 `mcpServers` map 扫描（Claude / pi / Qoder / Cursor 都用这个结构）。
-fn scan_mcp_servers_map(path: &PathBuf, agent: &str, label: &str) -> McpAgentScan {
+/// 通用的 `mcpServers` map 扫描。
+fn scan_map(path: &PathBuf, agent: &str, label: &str) -> McpAgentScan {
     let present = path.exists();
     let mut servers = Vec::new();
 
@@ -156,40 +174,264 @@ fn scan_mcp_servers_map(path: &PathBuf, agent: &str, label: &str) -> McpAgentSca
 }
 
 /// Claude Code：`~/.claude.json` 顶层 `mcpServers`。
+///
+/// 同一份文件里 `projects.*.mcpServers` 是项目级的，这里只读顶层。
 pub fn scan_claude() -> McpAgentScan {
-    scan_mcp_servers_map(&home().join(".claude.json"), "claude", "~/.claude.json")
+    scan_map(&home().join(".claude.json"), "claude", "~/.claude.json")
 }
 
 /// Cursor：`~/.cursor/mcp.json`。
 pub fn scan_cursor() -> McpAgentScan {
-    scan_mcp_servers_map(&home().join(".cursor").join("mcp.json"), "cursor", "~/.cursor/mcp.json")
-}
-
-/// pi：`~/.pi/agent/mcp.json`。
-pub fn scan_pi() -> McpAgentScan {
-    scan_mcp_servers_map(
-        &home().join(".pi").join("agent").join("mcp.json"),
-        "pi",
-        "~/.pi/agent/mcp.json",
+    scan_map(
+        &home().join(".cursor").join("mcp.json"),
+        "cursor",
+        "~/.cursor/mcp.json",
     )
 }
 
 /// Qoder：`~/.qoder/settings.json` 的 `mcpServers`。
 pub fn scan_qoder() -> McpAgentScan {
-    scan_mcp_servers_map(
+    scan_map(
         &home().join(".qoder").join("settings.json"),
         "qoder",
         "~/.qoder/settings.json",
     )
 }
 
+/// Pi：`~/.pi/agent/mcp.json`。
+pub fn scan_pi() -> McpAgentScan {
+    scan_map(
+        &home().join(".pi").join("agent").join("mcp.json"),
+        "pi",
+        "~/.pi/agent/mcp.json",
+    )
+}
+
+/// WorkBuddy：`~/.workbuddy/connectors/default/mcp.json`。
+///
+/// 这个文件有 83 个 connector，全是内置市场目录（`disabled: true`）。
+/// 全读进来但标记为未启用，让 diff 能区分「市场目录」和「用户主动启用的」。
+pub fn scan_workbuddy() -> McpAgentScan {
+    scan_map(
+        &home()
+            .join(".workbuddy")
+            .join("connectors")
+            .join("default")
+            .join("mcp.json"),
+        "workbuddy",
+        "~/.workbuddy/connectors/default/mcp.json",
+    )
+}
+
+/// Kimi Code：`~/.kimi-code/mcp.json`。
+pub fn scan_kimi() -> McpAgentScan {
+    scan_map(
+        &crate::mcp::inject::kimi::config_path(),
+        "kimi",
+        "~/.kimi-code/mcp.json",
+    )
+}
+
+/// MiniMax Code：`~/.minimax/mcp.json`。
+pub fn scan_minimax() -> McpAgentScan {
+    scan_map(
+        &crate::mcp::inject::minimax::config_path(),
+        "minimax",
+        "~/.minimax/mcp.json",
+    )
+}
+
+/// GitHub Copilot CLI：`~/.copilot/mcp-config.json`。
+///
+/// 禁用在 `settings.json` 的 `disabledMcpServers` 数组里，
+/// 不在条目本身。
+pub fn scan_copilot() -> McpAgentScan {
+    let path = crate::mcp::inject::copilot::config_path();
+    let mut scan = scan_map(&path, "copilot", "~/.copilot/mcp-config.json");
+
+    // 把 disabledMcpServers 里的标成未启用
+    let settings = crate::mcp::inject::copilot::settings_path();
+    if let Some(json) = read_json(&settings) {
+        let disabled: Vec<String> = json
+            .get("disabledMcpServers")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for s in &mut scan.servers {
+            if disabled.contains(&s.id) {
+                s.enabled = false;
+            }
+        }
+    }
+    scan
+}
+
+/// Antigravity：`~/.gemini/config/mcp_config.json`。
+pub fn scan_agy() -> McpAgentScan {
+    scan_map(
+        &crate::mcp::inject::agy::config_path(),
+        "agy",
+        "~/.gemini/config/mcp_config.json",
+    )
+}
+
+/// Oh My Pi：`~/.omp/default/agent/mcp.json`。
+///
+/// 除了条目自己的 `enabled`，还要看顶层 `disabledServers` 有没有它。
+pub fn scan_omp() -> McpAgentScan {
+    let path = crate::mcp::inject::omp::config_path();
+    let mut scan = scan_map(&path, "omp", "~/.omp/default/agent/mcp.json");
+
+    if let Some(json) = read_json(&path) {
+        let disabled: Vec<String> = json
+            .get("disabledServers")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for s in &mut scan.servers {
+            if disabled.contains(&s.id) {
+                s.enabled = false;
+            }
+        }
+    }
+    scan
+}
+
 /// Codex：`~/.codex/config.toml` 的 `[mcp_servers.*]`。
+///
+/// 读两种格式：标准 `[mcp_servers]` 和历史错误的 `[mcp.servers]`。
 pub fn scan_codex() -> McpAgentScan {
     let path = home().join(".codex").join("config.toml");
     let present = path.exists();
     let mut servers = Vec::new();
 
     if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(doc) = text.parse::<toml_edit::DocumentMut>() {
+            // 标准位置优先，再读历史错误位置
+            let mut tables: Vec<(&str, &toml_edit::Table)> = Vec::new();
+            if let Some(t) = doc.get("mcp_servers").and_then(|v| v.as_table()) {
+                tables.push(("mcp_servers", t));
+            }
+            if let Some(t) = doc
+                .get("mcp")
+                .and_then(|v| v.get("servers"))
+                .and_then(|v| v.as_table())
+            {
+                tables.push(("mcp.servers", t));
+            }
+
+            for (prefix, tbl) in tables {
+                for (id, v) in tbl {
+                    let get_str = |k: &str| {
+                        v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+                    };
+                    let args = v
+                        .get("args")
+                        .and_then(|a| a.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    // Codex 不写 type；有 url 就是 streamable HTTP
+                    let url = get_str("url");
+                    let raw_type = get_str("type");
+                    let transport = if !raw_type.is_empty() {
+                        Transport::parse(&raw_type)
+                    } else if !url.is_empty() {
+                        Transport::Http
+                    } else {
+                        Transport::Stdio
+                    };
+
+                    // 已存在同名时标准位置优先
+                    if servers.iter().any(|s: &FoundServer| s.id == *id) {
+                        continue;
+                    }
+
+                    servers.push(FoundServer {
+                        id: id.to_string(),
+                        name: {
+                            let n = get_str("name");
+                            if n.is_empty() {
+                                id.to_string()
+                            } else {
+                                n
+                            }
+                        },
+                        transport: transport.as_str().to_string(),
+                        command: get_str("command"),
+                        args,
+                        url,
+                        enabled: true,
+                        location: format!("config.toml · {prefix}.{id}"),
+                    });
+                }
+            }
+        }
+    }
+
+    McpAgentScan {
+        agent: "codex".into(),
+        present,
+        servers,
+        unsupported_reason: None,
+    }
+}
+
+/// opencode：`~/.config/opencode/` 下三份文件合并后的 `mcp` 段。
+///
+/// **必须合并读**：`config.json` → `opencode.json` → `opencode.jsonc`
+/// 依次覆盖。只看一份会漏 —— 本机 `.jsonc` 里有 provider、
+/// `.json` 里有 mcp，两份都得读。
+pub fn scan_opencode() -> McpAgentScan {
+    let dir = crate::mcp::inject::opencode::config_dir();
+    let present = crate::mcp::inject::opencode::CONFIG_FILES
+        .iter()
+        .any(|name| dir.join(name).exists());
+    let mut servers = Vec::new();
+
+    if let Ok(merged) = crate::mcp::inject::opencode::read_merged() {
+        if let Some(map) = merged.get("mcp").and_then(|v| v.as_object()) {
+            for (id, v) in map {
+                servers.push(parse_server(id, v, &format!("opencode · mcp.{id}")));
+            }
+        }
+    }
+
+    McpAgentScan {
+        agent: "opencode".into(),
+        present,
+        servers,
+        unsupported_reason: None,
+    }
+}
+
+/// Grok Build：`~/.grok/config.toml`，结构同 Codex。
+pub fn scan_grok() -> McpAgentScan {
+    let path = crate::mcp::inject::grok::config_path();
+    let mut scan = scan_toml_mcp(&path, "grok", "~/.grok/config.toml");
+    // Grok 的请求头字段是 headers，不是 http_headers；其余同 Codex
+    scan.agent = "grok".into();
+    scan
+}
+
+/// 读一个 `[mcp_servers.*]` 形状的 TOML 文件。
+fn scan_toml_mcp(path: &PathBuf, agent: &str, label: &str) -> McpAgentScan {
+    let present = path.exists();
+    let mut servers = Vec::new();
+
+    if let Ok(text) = std::fs::read_to_string(path) {
         if let Ok(doc) = text.parse::<toml_edit::DocumentMut>() {
             if let Some(tbl) = doc.get("mcp_servers").and_then(|v| v.as_table()) {
                 for (id, v) in tbl {
@@ -205,9 +447,8 @@ pub fn scan_codex() -> McpAgentScan {
                                 .collect()
                         })
                         .unwrap_or_default();
-
-                    let raw_type = get_str("type");
                     let url = get_str("url");
+                    let raw_type = get_str("type");
                     let transport = if !raw_type.is_empty() {
                         Transport::parse(&raw_type)
                     } else if !url.is_empty() {
@@ -215,19 +456,22 @@ pub fn scan_codex() -> McpAgentScan {
                     } else {
                         Transport::Stdio
                     };
-
                     servers.push(FoundServer {
                         id: id.to_string(),
                         name: {
                             let n = get_str("name");
-                            if n.is_empty() { id.to_string() } else { n }
+                            if n.is_empty() {
+                                id.to_string()
+                            } else {
+                                n
+                            }
                         },
                         transport: transport.as_str().to_string(),
                         command: get_str("command"),
                         args,
                         url,
                         enabled: true,
-                        location: format!("config.toml · mcp_servers.{id}"),
+                        location: format!("{label} · mcp_servers.{id}"),
                     });
                 }
             }
@@ -235,93 +479,25 @@ pub fn scan_codex() -> McpAgentScan {
     }
 
     McpAgentScan {
-        agent: "codex".into(),
-        present,
-        servers,
-        unsupported_reason: None,
-    }
-}
-
-/// opencode：`~/.config/opencode/opencode.json` 的 `mcp` 段。
-pub fn scan_opencode() -> McpAgentScan {
-    let path = home()
-        .join(".config")
-        .join("opencode")
-        .join("opencode.json");
-    let present = path.exists();
-    let mut servers = Vec::new();
-
-    if let Some(json) = read_json(&path) {
-        if let Some(map) = json.get("mcp").and_then(|v| v.as_object()) {
-            for (id, v) in map {
-                servers.push(parse_server(id, v, &format!("opencode.json · mcp.{id}")));
-            }
-        }
-    }
-
-    McpAgentScan {
-        agent: "opencode".into(),
-        present,
-        servers,
-        unsupported_reason: None,
-    }
-}
-
-/// WorkBuddy：`~/.workbuddy/connectors/default/mcp.json`。
-///
-/// 这个文件有 83 个 connector，全是内置市场目录（`disabled: true`）。
-/// 全读进来但标记为未启用，让 diff 能区分「市场目录」和「用户主动启用的」。
-pub fn scan_workbuddy() -> McpAgentScan {
-    let path = home()
-        .join(".workbuddy")
-        .join("connectors")
-        .join("default")
-        .join("mcp.json");
-    let present = path.exists();
-    let mut servers = Vec::new();
-
-    if let Some(json) = read_json(&path) {
-        if let Some(map) = json.get("mcpServers").and_then(|v| v.as_object()) {
-            for (id, v) in map {
-                servers.push(parse_server(
-                    id,
-                    v,
-                    &format!("workbuddy/connectors/mcp.json · {id}"),
-                ));
-            }
-        }
-    }
-
-    McpAgentScan {
-        agent: "workbuddy".into(),
-        present,
-        servers,
-        unsupported_reason: None,
-    }
-}
-
-/// ZCode / DSH 的 MCP 配置位置未探明。
-///
-/// 实测：
-/// - `~/.zcode/cli/config.json` 只有 `plugins.enabledPlugins`
-/// - `~/.dsh/profiles/desktop/cordis.patch.yml` 没有 `mcp` 段
-pub fn scan_unknown(agent: &str, dir: &PathBuf, detail: &str) -> McpAgentScan {
-    McpAgentScan {
         agent: agent.into(),
-        present: dir.exists(),
-        servers: Vec::new(),
-        unsupported_reason: if dir.exists() {
-            Some(detail.to_string())
-        } else {
-            None
-        },
+        present,
+        servers,
+        unsupported_reason: None,
     }
+}
+
+/// Gemini CLI：`~/.gemini/settings.json` 顶层 `mcpServers`。
+///
+/// 没有 `type`；HTTP 用 `httpUrl`、SSE 用 `url`。`parse_server` 都认。
+pub fn scan_gemini() -> McpAgentScan {
+    scan_map(
+        &crate::mcp::inject::gemini::config_path(),
+        "gemini",
+        "~/.gemini/settings.json",
+    )
 }
 
 /// ZCode：`~/.zcode/cli/config.json` 的 `mcp.servers`（嵌套两层）。
-///
-/// 注意不是顶层 `mcpServers` —— ZCode 的 schema 和 Claude/pi/Cursor 不同。
-/// 也没法和它们共用 `scan_mcp_servers_map`，因为键路径多了两层。
 pub fn scan_zcode() -> McpAgentScan {
     let path = home().join(".zcode").join("cli").join("config.json");
     let present = path.exists();
@@ -351,35 +527,20 @@ pub fn scan_zcode() -> McpAgentScan {
     }
 }
 
-/// Hermes：`$HERMES_HOME/config.yaml` 的 `mcp_servers` 段（YAML）。
+/// Hermes：`$HERMES_HOME/config.yaml` 的 `mcp_servers` 段。
 ///
-/// 结构（行级解析，不引 YAML 库 —— config.yaml 里有大段注释和长数组，
-/// 用库整体重写会全部丢失）：
-///
-/// ```yaml
-/// mcp_servers:
-///   time:
-///     command: uvx
-///     args: ["mcp-server-time"]
-///     env:
-///       KEY: value
-///   remote:
-///     url: https://example.com/mcp
-///     headers:
-///       Authorization: Bearer xxx
-/// ```
+/// 行级解析，不引 YAML 库 —— config.yaml 里有大段注释和长数组。
 pub fn scan_hermes() -> McpAgentScan {
-    let path = crate::providers::hermes::config_path();
+    let path = crate::mcp::inject::hermes::config_path();
     let present = path.exists();
     let mut servers = Vec::new();
 
     if let Ok(text) = std::fs::read_to_string(&path) {
         let lines: Vec<&str> = text.lines().collect();
-        // 找 mcp_servers: 段
         if let Some(start) = lines.iter().position(|l| l.starts_with("mcp_servers:")) {
             let mut end = lines.len();
             for (i, l) in lines.iter().enumerate().skip(start + 1) {
-                if l.trim().is_empty() {
+                if l.trim().is_empty() || l.trim_start().starts_with('#') {
                     continue;
                 }
                 if l.len() - l.trim_start().len() == 0 {
@@ -388,13 +549,8 @@ pub fn scan_hermes() -> McpAgentScan {
                 }
             }
 
-            let mut cur: Option<(String, FoundServer)> = None;
-
-            fn flush(out: &mut Vec<FoundServer>, cur: &mut Option<(String, FoundServer)>) {
-                if let Some((_, s)) = cur.take() {
-                    out.push(s);
-                }
-            }
+            let mut cur: Option<FoundServer> = None;
+            let mut in_sub = false;
 
             for line in &lines[start + 1..end] {
                 if line.trim().is_empty() || line.trim_start().starts_with('#') {
@@ -404,27 +560,27 @@ pub fn scan_hermes() -> McpAgentScan {
                 let t = line.trim();
 
                 if indent == 2 && t.ends_with(':') {
-                    // 新 server
-                    flush(&mut servers, &mut cur);
+                    if let Some(s) = cur.take() {
+                        servers.push(s);
+                    }
                     let id = t.trim_end_matches(':').to_string();
-                    cur = Some((
-                        id.clone(),
-                        FoundServer {
-                            id: id.clone(),
-                            name: id,
-                            transport: "stdio".to_string(),
-                            command: String::new(),
-                            args: Vec::new(),
-                            url: String::new(),
-                            enabled: true,
-                            location: format!("config.yaml · mcp_servers.{}", t.trim_end_matches(':')),
-                        },
-                    ));
+                    cur = Some(FoundServer {
+                        id: id.clone(),
+                        name: id.clone(),
+                        transport: "stdio".to_string(),
+                        command: String::new(),
+                        args: Vec::new(),
+                        url: String::new(),
+                        enabled: true,
+                        location: format!("config.yaml · mcp_servers.{id}"),
+                    });
+                    in_sub = false;
                     continue;
                 }
 
-                if let Some((_, s)) = cur.as_mut() {
+                if let Some(s) = cur.as_mut() {
                     if indent == 4 {
+                        in_sub = t.ends_with(':');
                         if let Some((k, v)) = t.split_once(':') {
                             let k = k.trim();
                             let v = v.trim();
@@ -434,9 +590,10 @@ pub fn scan_hermes() -> McpAgentScan {
                                     s.url = v.to_string();
                                     s.transport = "http".to_string();
                                 }
+                                "enabled" => s.enabled = v != "false",
                                 "args" => {
-                                    // 形如 ["a", "b"]
-                                    let inner = v.trim_start_matches('[').trim_end_matches(']');
+                                    let inner =
+                                        v.trim_start_matches('[').trim_end_matches(']');
                                     s.args = inner
                                         .split(',')
                                         .map(|x| x.trim().trim_matches('"').to_string())
@@ -448,8 +605,11 @@ pub fn scan_hermes() -> McpAgentScan {
                         }
                     }
                 }
+                let _ = in_sub;
             }
-            flush(&mut servers, &mut cur);
+            if let Some(s) = cur.take() {
+                servers.push(s);
+            }
         }
     }
 
@@ -461,7 +621,103 @@ pub fn scan_hermes() -> McpAgentScan {
     }
 }
 
+/// DSH：`~/.dsh/profiles/<profile>/cordis.patch.yml` 里的
+/// `name: "@deepseek-ai/dsh-mcp-client"` 条目。
+///
+/// 多个 profile 之间同名 server 只报一次（第一个读到的算）。
+pub fn scan_dsh() -> McpAgentScan {
+    let paths = crate::mcp::inject::dsh::target_paths();
+    let present = !paths.is_empty();
+    let mut servers: Vec<FoundServer> = Vec::new();
+
+    for path in &paths {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&text) else {
+            continue;
+        };
+        let Ok(json) = serde_json::to_value(&yaml) else {
+            continue;
+        };
+        let Some(patches) = json.as_array() else {
+            continue;
+        };
+
+        for patch in patches {
+            let mut candidates: Vec<&Value> = Vec::new();
+            if patch.get("name").and_then(|v| v.as_str()) == Some("@deepseek-ai/dsh-mcp-client") {
+                candidates.push(patch);
+            }
+            if let Some(list) = patch.get("insert").and_then(|v| v.as_array()) {
+                for entry in list {
+                    if entry.get("name").and_then(|v| v.as_str())
+                        == Some("@deepseek-ai/dsh-mcp-client")
+                    {
+                        candidates.push(entry);
+                    }
+                }
+            }
+
+            for entry in candidates {
+                let Some(config) = entry.get("config") else {
+                    continue;
+                };
+                let Some(id) = config.get("serverName").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if servers.iter().any(|s| s.id == id) {
+                    continue;
+                }
+                let transport = match config.get("transport").and_then(|v| v.as_str()) {
+                    Some("streamable-http") => Transport::Http,
+                    _ => Transport::Stdio,
+                };
+                let args = config
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let enabled = entry.get("disabled").and_then(|v| v.as_bool()) != Some(true);
+                servers.push(FoundServer {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                    transport: transport.as_str().to_string(),
+                    command: config
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    args,
+                    url: config
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    enabled,
+                    location: format!(
+                        "{} · dsh-mcp-client.{id}",
+                        path.file_name().and_then(|n| n.to_str()).unwrap_or("patch")
+                    ),
+                });
+            }
+        }
+    }
+
+    McpAgentScan {
+        agent: "dsh".into(),
+        present,
+        servers,
+        unsupported_reason: None,
+    }
+}
+
 /// 扫描全部支持的 agent。
+///
+/// 顺序和 `agents::mcp_capable()` 一致，方便 diff 里对照。
 pub fn scan_all() -> Vec<McpAgentScan> {
     vec![
         scan_claude(),
@@ -473,11 +729,14 @@ pub fn scan_all() -> Vec<McpAgentScan> {
         scan_workbuddy(),
         scan_zcode(),
         scan_hermes(),
-        scan_unknown(
-            "dsh",
-            &home().join(".dsh"),
-            "cordis.patch.yml 里没有 mcp 段，机制未探明",
-        ),
+        scan_dsh(),
+        scan_gemini(),
+        scan_grok(),
+        scan_kimi(),
+        scan_minimax(),
+        scan_copilot(),
+        scan_agy(),
+        scan_omp(),
     ]
 }
 

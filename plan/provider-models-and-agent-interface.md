@@ -331,10 +331,13 @@ models[2] → HAIKU      （不足时回落到 models.last()）
 - WorkBuddy 只有 `supportsImages` 一个布尔，模态列表靠反推，
   写不出 `video` / `pdf` 的区别。
 - 模型级只增改不删。
-- **Cursor 的 provider 管不了**。`~/.cursor/cli-config.json` 里没有任何
-  base_url / api_key 字段；`%APPDATA%\Cursor\User\globalStorage\state.vscdb`
-  的 `aiSettings.modelConfig` 只有 `modelId` / `maxMode` 这类选择偏好。
-  它的模型走 Cursor 自己的服务端订阅，没有可写的第三方端点配置。
+- **Cursor 的 provider 不做自动注入，但它支持自带密钥**。2026-11-14 重查过：
+  `state.vscdb` 的 `applicationUser` 里有 `openAIBaseUrl` / `useOpenAIKey`，
+  密钥在 `secret://cursorAuth/openAIKey`，经 Electron safeStorage 加密。
+  光改这两处不够 —— 用户在界面上必须手动打开「OpenAI API Key」开关，
+  否则 Cursor 会把自定义模型名当自家目录模型校验，直接回
+  `Model name is not valid`。因为要走加密值 + 界面开关 + 重启，且升级易失效，
+  所以不做注入器。配置步骤见 `plan/provider-config-keys.md` 的「Cursor」一节。
 - **从母版彻底删掉一条 MCP server 时，agent 配置里的残留不会被清理**。
   注入器只能看到「当前池子里有、但没分配给我」的 id；池子里没有的 id
   一律不动（这是为了不误删用户手配的）。要清理请先在界面上取消分配、
@@ -351,7 +354,7 @@ zcode、Hermes 的支持」。逐个核实后的结论：
 | ------ | ------------------------------------------ | -------------------------------------------- | -------------- |
 | Hermes | ✅ `$HERMES_HOME/config.yaml` 的 `providers` | ✅ 同文件 `mcp_servers`                          | 两项都加上了         |
 | ZCode  | ✅ 已支持                                      | ✅ `~/.zcode/cli/config.json` 的 `mcp.servers` | 补上了 MCP        |
-| Cursor | ❌ 无端点配置                                    | ✅ 已支持                                        | provider 确实管不了 |
+| Cursor | ❌ 请求经 Cursor 服务端转发，本地配置改不了端点 | ✅ 已支持                                        | provider 确实管不了 |
 
 ### ZCode 的 MCP 位置之前判断错了
 

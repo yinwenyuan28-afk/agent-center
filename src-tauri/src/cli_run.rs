@@ -54,7 +54,10 @@ pub fn run(cmd: Command) -> i32 {
                     "{:<12} {:<10} {:<10} {}",
                     m.agent, health, kind, m.target
                 );
-                if !matches!(m.health, crate::types::HealthState::Ok) && m.installed {
+                if m.disabled {
+                    println!("             └ 已取消映射，同步会跳过");
+                }
+                if !matches!(m.health, crate::types::HealthState::Ok) && m.installed && !m.disabled {
                     problems += 1;
                 }
             }
@@ -76,6 +79,10 @@ pub fn run(cmd: Command) -> i32 {
             };
             let mut failed = 0;
             for spec in cfg.resolved_mappings() {
+                if spec.disabled {
+                    println!("[skip] {}: 已取消映射", spec.label);
+                    continue;
+                }
                 if !spec.config_dir.exists() {
                     println!("[skip] {}: 配置目录不存在", spec.label);
                     continue;
@@ -105,14 +112,91 @@ pub fn run(cmd: Command) -> i32 {
                 0
             }
         }
+        Command::Unmap { agent } => run_unmap(&agent),
+        Command::Remap { agent } => run_remap(&agent),
         Command::Skills(sub) => run_skills(sub),
         Command::Creds(sub) => run_creds(sub),
         Command::Providers(sub) => run_providers(sub),
         Command::Claude(sub) => run_claude(sub),
         Command::Mcp(sub) => run_mcp(sub),
+        Command::Usage(sub) => run_usage(sub),
         Command::Agents => run_agents(),
         Command::Models(sub) => run_models(sub),
         Command::Git(sub) => run_git(sub),
+    }
+}
+
+/// 取消映射：删掉目标链接并写「已取消」标记。
+///
+/// 删除边界由 [`link::remove_one`] 保证 —— 母版不动，被改过的目标进备份。
+fn run_unmap(agent: &str) -> i32 {
+    let mut cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("读取配置失败: {e}");
+            return 1;
+        }
+    };
+    let resolved = cfg.resolved_mappings();
+    let Some(m) = resolved.iter().find(|m| m.agent == agent) else {
+        eprintln!("找不到 agent: {agent}");
+        return 1;
+    };
+
+    match link::remove_one(m) {
+        Ok(note) => println!("[{}] {note}", m.label),
+        Err(e) => {
+            eprintln!("[{}] 取消映射失败: {e}", m.label);
+            return 1;
+        }
+    }
+
+    if let Err(e) = cfg.set_mapping_disabled(agent, true).and_then(|_| cfg.save()) {
+        eprintln!("写入配置失败: {e}");
+        return 1;
+    }
+    println!("已记下「已取消」，后续 sync 会跳过。用 `agentcenter remap {agent}` 恢复。");
+    0
+}
+
+/// 恢复映射：清掉「已取消」标记并立刻重建链接。
+fn run_remap(agent: &str) -> i32 {
+    let mut cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("读取配置失败: {e}");
+            return 1;
+        }
+    };
+
+    if let Err(e) = cfg.set_mapping_disabled(agent, false).and_then(|_| cfg.save()) {
+        eprintln!("写入配置失败: {e}");
+        return 1;
+    }
+
+    // 重新加载，让 resolved 里的 disabled 已经是 false
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("读取配置失败: {e}");
+            return 1;
+        }
+    };
+    let resolved = cfg.resolved_mappings();
+    let Some(m) = resolved.iter().find(|m| m.agent == agent) else {
+        eprintln!("找不到 agent: {agent}");
+        return 1;
+    };
+
+    match link::sync_one(m) {
+        Ok((kind, note)) => {
+            println!("[{}] {:?} - {note}", m.label, kind);
+            0
+        }
+        Err(e) => {
+            eprintln!("[{}] 恢复失败: {e}", m.label);
+            1
+        }
     }
 }
 
@@ -421,6 +505,236 @@ fn run_claude(cmd: crate::cli::ClaudeCmd) -> i32 {
     }
 }
 
+/// Cursor 自带密钥（BYOK）子命令。
+///
+/// Cursor 的配置在 SQLite 库里、密钥经 safeStorage 加密，不能像别的 agent
+/// 那样走 `providers sync` 自动写。这一组命令是「半自动」的：
+/// 读状态、算差异、然后在用户确认 Cursor 已退出之后才写。
+fn run_cursor_cmd(cmd: crate::cli::CursorCmd) -> i32 {
+    use crate::cli::CursorCmd;
+    use crate::providers::cursor_db;
+
+    match cmd {
+        CursorCmd::Status => {
+            let st = match cursor_db::read_state() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("读取 Cursor 配置失败: {e}");
+                    return 1;
+                }
+            };
+
+            if !st.installed {
+                println!("没找到 Cursor 的配置库，可能没装过或没启动过。");
+                println!("期望位置：{}", st.db_path);
+                return 0;
+            }
+
+            println!("库文件：{}", st.db_path);
+            println!();
+            println!(
+                "Use OpenAI API Key : {}",
+                if st.use_openai_key {
+                    "已打开"
+                } else {
+                    "未打开  ← 关着时自定义模型一定用不了"
+                }
+            );
+            println!(
+                "接口地址           : {}",
+                st.base_url.as_deref().unwrap_or("（未设置，走 OpenAI 官方）")
+            );
+            println!(
+                "密钥               : {}",
+                if st.key_len == 0 {
+                    "未存".to_string()
+                } else {
+                    format!("长度 {}，末尾 …{}", st.key_len, st.key_tail)
+                }
+            );
+            println!(
+                "自定义模型         : {}",
+                if st.user_added_models.is_empty() {
+                    "（无）".to_string()
+                } else {
+                    st.user_added_models.join(", ")
+                }
+            );
+            println!(
+                "\nCursor 进程        : {}",
+                if cursor_db::is_running() {
+                    "正在运行（写入前需要完全退出）"
+                } else {
+                    "未运行"
+                }
+            );
+            0
+        }
+
+        CursorCmd::Plan { provider, models } => {
+            let (base_url, key) = match load_provider_fields(&provider) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
+
+            let plan = match cursor_db::plan(&base_url, &key, &models) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("无法生成计划: {e}");
+                    return 1;
+                }
+            };
+
+            if plan.is_noop() {
+                println!("Cursor 的配置已经和 {provider} 一致，不需要改动。");
+                return 0;
+            }
+
+            println!("要让 {provider} 在 Cursor 里生效，需要做这些事：");
+            for (i, line) in plan.summary.iter().enumerate() {
+                println!("  {}. {line}", i + 1);
+            }
+            println!("\n这些改动会写进 Cursor 的 state.vscdb。执行前请完全退出 Cursor。");
+            0
+        }
+
+        CursorCmd::Apply {
+            provider,
+            models,
+            force,
+        } => {
+            let (base_url, key) = match load_provider_fields(&provider) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
+
+            let plan = match cursor_db::plan(&base_url, &key, &models) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("无法生成计划: {e}");
+                    return 1;
+                }
+            };
+
+            if plan.is_noop() {
+                println!("Cursor 的配置已经和 {provider} 一致，无需改动。");
+                return 0;
+            }
+
+            if cursor_db::is_running() && !force {
+                eprintln!("Cursor 正在运行。它的内存状态会覆盖我们的写入，");
+                eprintln!("并发写 4 GB 的 SQLite 还有损坏风险。");
+                eprintln!();
+                eprintln!("请先完全退出 Cursor（托盘图标也要退），然后重跑这条命令。");
+                eprintln!("确实要强行写入（不推荐）：加 --force");
+                return 2;
+            }
+
+            match cursor_db::apply(&plan, &key, force) {
+                Ok(log) => {
+                    println!("已写入 Cursor：");
+                    for line in log {
+                        println!("  - {line}");
+                    }
+                    println!("\n重启 Cursor 后生效。");
+                    println!("在 Cursor 的模型选择器里选 {provider} 的模型发一句话即可验证。");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("写入失败: {e}");
+                    1
+                }
+            }
+        }
+
+        CursorCmd::RemoveModel { models, force } => {
+            if models.is_empty() {
+                eprintln!("要删哪个模型？例如：providers cursor remove-model deepseek/deepseek-v4.1-flash");
+                return 2;
+            }
+
+            if cursor_db::is_running() && !force {
+                eprintln!("Cursor 正在运行，写库会被它覆盖。请先完全退出 Cursor 再重试。");
+                return 2;
+            }
+
+            // 只删模型，不动开关/地址/密钥 —— 删一个模型不该顺带重写接口配置
+            let plan = cursor_db::plan_remove_models(&models);
+            match cursor_db::apply(&plan, "", force) {
+                Ok(log) => {
+                    println!("已更新 Cursor 的模型选择器：");
+                    for line in log {
+                        println!("  - {line}");
+                    }
+                    println!("\n重启 Cursor 后生效。");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("删除失败: {e}");
+                    1
+                }
+            }
+        }
+
+        CursorCmd::Reset => {
+            let plan = crate::providers::cursor_db::CursorPlan {
+                set_use_openai_key: Some(false),
+                set_base_url: Some(String::new()),
+                write_key: false,
+                add_models: Vec::new(),
+                remove_models: Vec::new(),
+                summary: vec!["关闭自带密钥，清空接口地址".into()],
+            };
+
+            if cursor_db::is_running() {
+                eprintln!("Cursor 正在运行，请先完全退出再重置。");
+                return 2;
+            }
+
+            match cursor_db::apply(&plan, "", false) {
+                Ok(log) => {
+                    println!("已重置 Cursor：");
+                    for line in log {
+                        println!("  - {line}");
+                    }
+                    println!("\n重启 Cursor 后回到官方模型。");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("重置失败: {e}");
+                    1
+                }
+            }
+        }
+    }
+}
+
+/// 从母版里取某个 provider 的接口地址和密钥，供 Cursor 命令用。
+///
+/// 单独抽出来是因为 `Status` / `Plan` / `Apply` 三个分支都要这两项，
+/// 报错信息也只写一遍。
+fn load_provider_fields(id: &str) -> anyhow::Result<(String, String)> {
+    use crate::providers::store;
+
+    let list = store::load_or_default()?;
+    let Some(p) = list.iter().find(|p| p.id == id) else {
+        anyhow::bail!("母版里没有 provider：{id}。用 `agentcenter providers list` 看现有的");
+    };
+    if p.base_url.trim().is_empty() {
+        anyhow::bail!("provider {id} 没有 base_url，Cursor 需要它");
+    }
+    if p.api_key.trim().is_empty() {
+        anyhow::bail!("provider {id} 没有 api_key，Cursor 需要它");
+    }
+    Ok((p.base_url.clone(), p.api_key.clone()))
+}
+
 /// provider 统一管理子命令。
 fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
     use crate::cli::ProvidersCmd;
@@ -572,6 +886,7 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
             agent_kinds,
             models,
             agents,
+            codex_model,
         } => {
             let mut list = match store::load_or_default() {
                 Ok(l) => l,
@@ -621,6 +936,19 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                 if !agents.is_empty() {
                     existing.agents = agents;
                 }
+                if let Some(m) = codex_model {
+                    // 必须是这个 provider 自己的模型，否则写进去 Codex 会拿去
+                    // 请求一个上游根本没有的名字
+                    let m = m.trim().to_string();
+                    if m.is_empty() {
+                        existing.codex_model = None;
+                    } else if existing.models.iter().any(|x| x.id == m) {
+                        existing.codex_model = Some(m);
+                    } else {
+                        eprintln!("--codex-model {m} 不在这个 provider 的 --models 里");
+                        return 1;
+                    }
+                }
             } else {
                 // 新增：必填字段缺了就报错
                 let (Some(n), Some(b), Some(k)) = (name, base_url, api_key) else {
@@ -647,6 +975,18 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                     }
                 }
 
+                let mut picked = None;
+                if let Some(m) = codex_model {
+                    let m = m.trim().to_string();
+                    if !m.is_empty() {
+                        if !models.iter().any(|x| *x == m) {
+                            eprintln!("--codex-model {m} 不在这次传入的 --models 里");
+                            return 1;
+                        }
+                        picked = Some(m);
+                    }
+                }
+
                 list.push(model::Provider {
                     id: id.clone(),
                     name: n,
@@ -663,6 +1003,7 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                     // CLI 的 providers set 不碰这个开关；要用就写母版
                     // 的 codex_requires_openai_auth，或走界面上的 Codex 配置
                     codex_requires_openai_auth: None,
+                    codex_model: picked,
                     note: String::new(),
                 });
             }
@@ -767,6 +1108,8 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                 }
             }
         }
+
+        ProvidersCmd::Cursor { cmd } => run_cursor_cmd(cmd),
 
         ProvidersCmd::Example => {
             println!("{}", store::example_content());
@@ -1003,6 +1346,156 @@ fn run_skills(cmd: SkillsCmd) -> i32 {
             }
         }
     }
+}
+
+/// token 用量统计子命令。
+///
+/// 输出保持 ASCII 安全（不用表格框线），避免 Windows 终端 GBK 代码页下花屏。
+/// token 数按千分位分隔，几十亿的数字才看得清位数。
+fn run_usage(cmd: crate::cli::UsageCmd) -> i32 {
+    use crate::cli::UsageCmd;
+
+    match cmd {
+        UsageCmd::Status => {
+            let report = crate::usage::collect_report(0, false);
+            println!("{:<10} {:<12} {:<8} {:<8} {}", "AGENT", "SUPPORTED", "ENABLED", "SOURCE?", "DATA");
+            for a in &report.agents {
+                // 不支持的 agent 也要列出来，否则用户会以为这里漏了
+                if !a.supported {
+                    println!("{:<10} {:<12} {:<8} {:<8} {}", a.agent, "no", "-", "-", "暂不支持");
+                    continue;
+                }
+                let state = if !a.enabled {
+                    "未启用（用 usage enable 打开）"
+                } else if !a.error.is_empty() {
+                    a.error.as_str()
+                } else if !a.available {
+                    "数据源不存在"
+                } else {
+                    "ok"
+                };
+                println!(
+                    "{:<10} {:<12} {:<8} {:<8} {}",
+                    a.agent,
+                    "yes",
+                    if a.enabled { "yes" } else { "no" },
+                    if a.available { "yes" } else { "no" },
+                    state
+                );
+                if a.enabled && !a.source.is_empty() {
+                    println!("{:<10} {:<12} {:<8} {:<8} {}", "", "", "", "", a.source);
+                    println!("{:<10} {:<12} {:<8} {:<8} {} 条记录", "", "", "", "", a.records);
+                }
+            }
+            0
+        }
+
+        UsageCmd::Report { days, refresh } => {
+            let report = crate::usage::collect_report(days, refresh);
+            let enabled: Vec<_> = report.agents.iter().filter(|a| a.enabled).collect();
+
+            if enabled.is_empty() {
+                println!("还没有启用任何 agent 的用量统计。");
+                println!("先跑 `agentcenter usage enable zcode`（pi / codex / claude 同理）。");
+                return 0;
+            }
+
+            // 只读失败的 agent 单独提示，不混进统计表
+            for a in &enabled {
+                if !a.error.is_empty() {
+                    println!("[失败] {}: {}", a.label, a.error);
+                } else if !a.available {
+                    println!("[跳过] {}: 数据源不存在（{}）", a.label, a.source);
+                }
+            }
+
+            let scope = if days == 0 {
+                "全部历史".to_string()
+            } else {
+                format!("最近 {days} 天")
+            };
+
+            if report.rows.is_empty() {
+                println!("\n{scope}内没有用量记录。");
+                return 0;
+            }
+
+            println!("\n=== token 用量（{scope}）===\n");
+            println!(
+                "{:<12} {:<10} {:<40} {:>16} {:>12} {:>8}",
+                "DATE", "AGENT", "MODEL", "INPUT", "OUTPUT", "CALLS"
+            );
+
+            let (mut t_in, mut t_out, mut t_calls) = (0u64, 0u64, 0u64);
+            for r in &report.rows {
+                t_in += r.input;
+                t_out += r.output;
+                t_calls += r.calls;
+                // 模型名可能很长，截到 40 字符保持列对齐
+                let model: String = if r.model.chars().count() > 40 {
+                    r.model.chars().take(39).collect::<String>() + "~"
+                } else {
+                    r.model.clone()
+                };
+                println!(
+                    "{:<12} {:<10} {:<40} {:>16} {:>12} {:>8}",
+                    r.date,
+                    r.agent,
+                    model,
+                    thousands(r.input),
+                    thousands(r.output),
+                    r.calls
+                );
+            }
+
+            println!(
+                "\n合计：input {} / output {} / {} 次调用",
+                thousands(t_in),
+                thousands(t_out),
+                t_calls
+            );
+            println!("口径：input 已折算为含缓存命中，output 不含推理细分。");
+            0
+        }
+
+        UsageCmd::Enable { agent } => match crate::usage::set_enabled(&agent, true) {
+            Ok(_) => {
+                println!("{agent} 已纳入用量统计");
+                0
+            }
+            Err(e) => {
+                eprintln!("启用失败: {e}");
+                1
+            }
+        },
+
+        UsageCmd::Disable { agent } => match crate::usage::set_enabled(&agent, false) {
+            Ok(_) => {
+                println!("{agent} 已从用量统计中移除");
+                0
+            }
+            Err(e) => {
+                eprintln!("关闭失败: {e}");
+                1
+            }
+        },
+    }
+}
+
+/// 给数字加千分位。`6103448793` → `6,103,448,793`。
+///
+/// 手动实现而不引依赖：只需要这一处，加个库不值得。
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().enumerate() {
+        // 除首位外，每 3 位插一个逗号
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// git 子命令。

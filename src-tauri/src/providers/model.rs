@@ -264,6 +264,20 @@ pub struct Provider {
         skip_serializing_if = "Option::is_none"
     )]
     pub codex_requires_openai_auth: Option<bool>,
+    /// 分配给 Codex 时，`config.toml` 顶层 `model` 写哪个模型。
+    ///
+    /// Codex 的模型选择器只列它自己官方目录里的模型（`codex debug models`
+    /// 能导出来看），自定义 provider 的模型进不去。所以「用哪个模型」只能
+    /// 由配置文件的顶层 `model` 决定 —— Codex 不校验这个名字，会原样发给
+    /// 上游（找不到元数据时只打一条 warning）。
+    ///
+    /// 不填时注入器回退到 `models` 的第一个，保持存量行为不变。
+    #[serde(
+        default,
+        rename = "codex_model",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_model: Option<String>,
     /// 备注，自由文本。用于记录 key 是哪天从哪拿的
     #[serde(default)]
     pub note: String,
@@ -376,6 +390,19 @@ impl Provider {
     /// 按 id 找模型。找不到返回 None。
     pub fn find_model(&self, id: &str) -> Option<&ModelSpec> {
         self.models.iter().find(|m| m.id == id)
+    }
+
+    /// 给 Codex 用的模型 id。
+    ///
+    /// 优先取 `codex_model`，没填就回退到 `models` 的第一个。
+    /// 一个模型都没有时返回 None，注入器据此跳过写 `model` 键。
+    pub fn codex_model_or_first(&self) -> Option<&str> {
+        if let Some(m) = self.codex_model.as_deref() {
+            if !m.trim().is_empty() {
+                return Some(m);
+            }
+        }
+        self.models.first().map(|m| m.id.as_str())
     }
 }
 

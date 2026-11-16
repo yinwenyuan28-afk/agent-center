@@ -47,6 +47,24 @@ pub struct CodexInjector;
 /// 第三方统一用的表名。和 cc-switch 保持一致。
 const ROUTE_ID: &str = "custom";
 
+/// Codex 接受的推理档位。
+///
+/// 这些值会被原样放进请求体的 `reasoning.effort`，上游是封闭枚举：
+/// 传别的字符串直接 400（实测传 `enabled` 报
+/// `Invalid option: expected one of "none"|"minimal"|"low"|...`）。
+///
+/// 母版的档位词表可能更大也可能更小 —— 各家中转自己的写法不统一，
+/// CommandCode 的 mimo 就写 `enabled` / `off`。所以注入前必须收敛。
+const EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// 这个档位能不能写进 `config.toml`。
+///
+/// 见 [`EFFORTS`] 的说明：母版的档位词表和 Codex 的不一致，写错的后果
+/// 是每次请求都被上游 400，而不是「档位被忽略」。
+pub fn is_codex_effort(v: &str) -> bool {
+    EFFORTS.contains(&v)
+}
+
 impl CodexInjector {
     fn config_path() -> PathBuf {
         super::store::home_dir().join(".codex").join("config.toml")
@@ -153,23 +171,68 @@ impl Injector for CodexInjector {
                     summary.push(format!("model_provider → {ROUTE_ID}"));
                 }
 
-                // 模型：取第一个，并写推理档位
-                if let Some(model) = p.models.first() {
+                // 模型：优先取 provider 上显式指定的 `codex_model`，
+                // 没指定才回退到 models 的第一个。
+                //
+                // Codex 的模型选择器只列它自己的官方目录（`codex debug models`
+                // 能导出那 12 个），自定义 provider 的模型进不去。所以「用哪个
+                // 模型」只能由这个顶层 `model` 键决定 —— Codex 不校验名字，
+                // 找不到元数据只打一条 warning，名字照原样发给上游。
+                if let Some(model) = p.codex_model_or_first() {
                     let cur = doc.get("model").and_then(|v| v.as_str()).unwrap_or("");
-                    if cur != model.id {
-                        doc["model"] = toml_edit::value(model.id.clone());
+                    if cur != model {
+                        doc["model"] = toml_edit::value(model.to_string());
                         changed = true;
-                        summary.push(format!("model → {}", model.id));
+                        summary.push(format!("model → {model}"));
                     }
-                    if let Some(effort) = &model.default_effort {
-                        let cur = doc
-                            .get("model_reasoning_effort")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if cur != effort {
-                            doc["model_reasoning_effort"] = toml_edit::value(effort.clone());
+
+                    // 推理档位取自被选中的那个模型的元数据。
+                    //
+                    // 但母版的档位词表不一定是 Codex 的：实测 CommandCode 的
+                    // mimo 写的是 `enabled` / `off`，而 Codex 会把
+                    // `model_reasoning_effort` 原样放进请求体的
+                    // `reasoning.effort`，上游只认那七个值，别的一律 400：
+                    // `Invalid option: expected one of "none"|"minimal"|...`
+                    //
+                    // 所以只有落在白名单里的值才写；不认识的值不写，并且把
+                    // 文件里残留的不合法值一并删掉 —— 留着会让每次请求都失败，
+                    // 而「没有这个键」Codex 会用默认档位。
+                    let raw_effort = p.find_model(model).and_then(|m| m.default_effort.as_deref());
+                    let want_effort = raw_effort.filter(|e| is_codex_effort(e));
+
+                    // 先取成 String，好让下面能改 doc
+                    let cur = doc
+                        .get("model_reasoning_effort")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    match want_effort {
+                        Some(effort) if cur != effort => {
+                            doc["model_reasoning_effort"] = toml_edit::value(effort.to_string());
                             changed = true;
                             summary.push(format!("model_reasoning_effort → {effort}"));
+                        }
+                        Some(_) => {}
+                        None => {
+                            // 母版给的值不能用（或压根没给）。文件里已有的值
+                            // 只要合法就保留 —— 那是用户自己在 config.toml 里选的；
+                            // 不合法必须删，否则 Codex 每次请求都会被上游 400。
+                            if !cur.is_empty() && !is_codex_effort(&cur) {
+                                doc.remove("model_reasoning_effort");
+                                changed = true;
+                                summary.push(format!(
+                                    "移除不认识的 model_reasoning_effort = {cur}（Codex 只接受 {}）",
+                                    EFFORTS.join("|")
+                                ));
+                            }
+                            if let Some(raw) = raw_effort {
+                                if !is_codex_effort(raw) {
+                                    summary.push(format!(
+                                        "母版档位 {raw} 不在 Codex 词表里，本次不写 model_reasoning_effort"
+                                    ));
+                                }
+                            }
                         }
                     }
                 }

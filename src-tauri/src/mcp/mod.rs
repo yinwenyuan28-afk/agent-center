@@ -6,7 +6,8 @@
 //! - [`store`] —— 母版 `~/.agents/mcp.toml` 读写
 //! - [`scan`] —— 从各 agent 现有配置读 server（只读）
 //! - [`diff`] —— 母版 vs 现状对比
-//! - [`inject`] —— 七个 agent 的注入器 + 同步调度
+//! - [`inject`] —— 每个工具一个文件，共 18 个注入器
+//! - [`matrix`] —— server 池 × agent 的分配矩阵
 
 pub mod diff;
 pub mod inject;

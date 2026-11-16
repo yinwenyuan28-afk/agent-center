@@ -12,7 +12,7 @@
 
 use crate::config::SkillTags;
 use crate::link;
-use crate::types::{CollectPlan, OrphanRelation, OrphanSkill, Skill};
+use crate::types::{CollectPlan, OrphanAction, OrphanActionResult, OrphanRelation, OrphanSkill, Skill};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -219,7 +219,7 @@ pub fn scan_orphans(tags: &SkillTags) -> anyhow::Result<Vec<OrphanSkill>> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    // 中心库现有 skill 的指纹，用于判断"是否相同"
+    // 中心库现有 skill 的指纹与描述，用于判断「是否相同」和冲突时对照
     let mut shared_hashes: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     if shared.exists() {
@@ -281,6 +281,10 @@ pub fn scan_orphans(tags: &SkillTags) -> anyhow::Result<Vec<OrphanSkill>> {
                             location,
                             path: path.to_string_lossy().to_string(),
                             relation: OrphanRelation::BrokenLink,
+                            description: String::new(),
+                            file_count: 0,
+                            size_bytes: 0,
+                            hash: String::new(),
                         });
                         continue;
                     }
@@ -303,11 +307,24 @@ pub fn scan_orphans(tags: &SkillTags) -> anyhow::Result<Vec<OrphanSkill>> {
                 },
             };
 
+            // 描述、大小、指纹都算一遍交给界面：冲突时用户要靠这些信息
+            // 判断该采用哪一份，只给路径是看不出来的。
+            let (file_count, size_bytes) = dir_stats(&path);
+            let hash: String = link::sha256_dir(&path)
+                .unwrap_or_default()
+                .chars()
+                .take(8)
+                .collect();
+
             out.push(OrphanSkill {
                 name,
                 location,
                 path: path.to_string_lossy().to_string(),
                 relation,
+                description: read_description(&path.join("SKILL.md")),
+                file_count,
+                size_bytes,
+                hash,
             });
         }
     }
@@ -414,4 +431,154 @@ pub fn apply_plan(plan: &CollectPlan) -> anyhow::Result<Vec<String>> {
     }
 
     Ok(log)
+}
+
+/// 对**一条**散落 skill 执行用户选定的处置。
+///
+/// 和 [`apply_plan`] 的区别：那个按关系批量套用固定策略，这个由用户在
+/// 界面上逐条选。所以每条都单独重新校验现场，不信任界面拿着的旧扫描结果
+/// —— 对话框开着的时候用户完全可能在资源管理器里动过文件。
+///
+/// 每个分支的共同底线：**中心库原有的内容不会因为误点而消失**。
+/// 需要覆盖中心库（`TakeOrphan`）时先把中心库那份备份掉。
+pub fn apply_action(path: &str, action: OrphanAction) -> OrphanActionResult {
+    let src = PathBuf::from(path);
+    let name = src
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string());
+
+    let result = |ok: bool, message: String| OrphanActionResult {
+        name: name.clone(),
+        path: path.to_string(),
+        action,
+        ok,
+        message,
+    };
+
+    // 现场复核：路径没了就别继续，直接告诉用户重扫
+    if !src.exists() && !link::is_link(&src) {
+        return result(false, "这条已经不在磁盘上了，请重新扫描".to_string());
+    }
+
+    let shared = shared_skills_dir();
+
+    match action {
+        OrphanAction::Import => import_one(&src, &name, &shared).map_or_else(
+            |e| result(false, format!("移入失败：{e}")),
+            |m| result(true, m),
+        ),
+
+        OrphanAction::Dedupe | OrphanAction::TakeShared => {
+            let dst = shared.join(&name);
+            if !dst.exists() {
+                return result(
+                    false,
+                    format!("中心库里没有 {name}，不能用中心库那一份覆盖"),
+                );
+            }
+            replace_with_link(&src, &dst, "散落副本").map_or_else(
+                |e| result(false, format!("处理失败：{e}")),
+                |m| result(true, m),
+            )
+        }
+
+        OrphanAction::TakeOrphan => {
+            let dst = shared.join(&name);
+            if !dst.exists() {
+                // 中心库没有这一份，那「采用散落版」等价于移入
+                return import_one(&src, &name, &shared).map_or_else(
+                    |e| result(false, format!("移入失败：{e}")),
+                    |m| result(true, m),
+                );
+            }
+            // 先备份中心库那份，再把散落这份搬到中心库
+            match link::backup_dir_copy(&dst) {
+                Ok(bak) => {
+                    if let Err(e) = fs::remove_dir_all(&dst) {
+                        return result(false, format!("删除中心库旧版失败：{e}"));
+                    }
+                    match fs::rename(&src, &dst) {
+                        Ok(()) => match link::create_link(&src, &dst, crate::types::LinkMode::Auto)
+                        {
+                            Ok((kind, _)) => result(
+                                true,
+                                format!(
+                                    "已用散落版替换中心库；旧版备份在 {}；原位置建立 {kind:?}",
+                                    bak.display()
+                                ),
+                            ),
+                            Err(e) => result(
+                                true,
+                                format!(
+                                    "已替换中心库；旧版备份在 {}；但原位置建链接失败：{e}",
+                                    bak.display()
+                                ),
+                            ),
+                        },
+                        Err(e) => result(false, format!("搬到中心库失败：{e}")),
+                    }
+                }
+                Err(e) => result(false, format!("备份中心库旧版失败：{e}")),
+            }
+        }
+
+        OrphanAction::Delete => {
+            // 只删这一份，不建链接。用户明确要断掉这个 agent 对它的访问
+            if link::is_link(&src) {
+                fs::remove_file(&src)
+                    .or_else(|_| fs::remove_dir(&src))
+                    .map_or_else(
+                        |e| result(false, format!("删除链接失败：{e}")),
+                        |_| result(true, "已删除链接".to_string()),
+                    )
+            } else {
+                fs::remove_dir_all(&src).map_or_else(
+                    |e| result(false, format!("删除失败：{e}")),
+                    |_| result(true, "已删除这份散落副本".to_string()),
+                )
+            }
+        }
+
+        OrphanAction::RemoveLink => {
+            if !link::is_link(&src) {
+                return result(false, "现在不是链接了（可能刚被改过），请重新扫描".to_string());
+            }
+            fs::remove_file(&src)
+                .or_else(|_| fs::remove_dir(&src))
+                .map_or_else(
+                    |e| result(false, format!("删除坏链接失败：{e}")),
+                    |_| result(true, "已删除坏链接".to_string()),
+                )
+        }
+    }
+}
+
+/// 把散落目录移进中心库，并在原位置建链接指回来。
+fn import_one(src: &Path, name: &str, shared: &Path) -> anyhow::Result<String> {
+    fs::create_dir_all(shared)?;
+    let dst = shared.join(name);
+
+    if dst.exists() {
+        anyhow::bail!("中心库已存在同名目录 {name}，要覆盖请用「采用散落版」");
+    }
+
+    fs::rename(src, &dst)?;
+    match link::create_link(src, &dst, crate::types::LinkMode::Auto) {
+        Ok((kind, _)) => Ok(format!("已移入中心库，原位置建立 {kind:?}")),
+        Err(e) => Ok(format!("已移入中心库，但原位置建链接失败：{e}")),
+    }
+}
+
+/// 删掉散落那一份，在原位置建一个指向中心库的链接。
+fn replace_with_link(src: &Path, dst: &Path, what: &str) -> anyhow::Result<String> {
+    if src.is_dir() && !link::is_link(src) {
+        fs::remove_dir_all(src)?;
+    } else {
+        fs::remove_file(src).or_else(|_| fs::remove_dir(src))?;
+    }
+    match link::create_link(src, dst, crate::types::LinkMode::Auto) {
+        Ok((kind, _)) => Ok(format!("已删除{what}，原位置建立 {kind:?} 指向中心库")),
+        Err(e) => anyhow::bail!("{what}已删，但原位置建链接失败：{e}"),
+    }
 }

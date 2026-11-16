@@ -159,10 +159,8 @@ fn installed_major_version() -> Option<u32> {
     }
 
     // PATH 上的 CLI：`opencode --version`
-    if let Ok(out) = std::process::Command::new("opencode")
-        .arg("--version")
-        .output()
-    {
+    // 走 crate::proc：主程序无控制台，裸 Command 会弹黑窗口。
+    if let Ok(out) = crate::proc::output("opencode", &["--version"], None) {
         let text = String::from_utf8_lossy(&out.stdout);
         if let Some(m) = parse_major(text.trim()) {
             return Some(m);
@@ -188,10 +186,7 @@ fn windows_desktop_file_version() -> Option<u32> {
     // PowerShell 比额外链 winapi 轻：只在注入时跑一次。
     let path = exe.display().to_string().replace('\'', "''");
     let script = format!("(Get-Item -LiteralPath '{path}').VersionInfo.FileVersion");
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()
-        .ok()?;
+    let out = crate::proc::output("powershell", &["-NoProfile", "-Command", &script], None).ok()?;
     if !out.status.success() {
         return None;
     }

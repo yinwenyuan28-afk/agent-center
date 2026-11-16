@@ -14,6 +14,8 @@ import type {
   ClaudeOnboardingStatus,
   CollectPlan,
   CredentialOverview,
+  CursorByokPlan,
+  CursorByokState,
   GitStatus,
   ManagedSkill,
   Mapping,
@@ -22,6 +24,8 @@ import type {
   McpServerView,
   McpSyncReportView,
   ModelSpec,
+  OrphanAction,
+  OrphanActionResult,
   OrphanSkill,
   ProviderDiffReport,
   ProviderMatrix,
@@ -29,6 +33,7 @@ import type {
   ProviderView,
   RunResult,
   Skill,
+  UsageReport,
 } from './types';
 
 /** Tauri 注入的全局对象存在与否，是判断当前运行环境的唯一可靠依据。 */
@@ -64,6 +69,17 @@ export const syncMappings = (dryRun: boolean) =>
 export const repairMapping = (agent: string) =>
   call<RunResult>('repair_mapping', { agent });
 
+/**
+ * 取消某个 agent 的映射：删掉目标位置的链接或副本，并记下「已取消」。
+ *
+ * 必须记标记，否则下一次「同步全部」会立刻把链接建回来。
+ * 目标内容与母版不一致时会被移进 `~/.agents/backup/` 而不是直接删。
+ */
+export const unmap = (agent: string) => call<RunResult>('unmap', { agent });
+
+/** 恢复被取消的映射：清掉标记并立刻重建链接。 */
+export const remap = (agent: string) => call<RunResult>('remap', { agent });
+
 // ---- 母版文档 ----
 
 /** 母版文件的读取结果。exists 为 false 时 content 是空串。 */
@@ -96,6 +112,15 @@ export const scanOrphans = () => call<OrphanSkill[]>('scan_orphans');
 /** 执行收集。apply 为 false 时只返回计划。 */
 export const collectSkills = (apply: boolean) =>
   call<CollectPlan>('collect_skills', { apply });
+
+/**
+ * 对一条散落 skill 执行用户选定的处置。
+ *
+ * 与 collectSkills 的区别：那个按关系套固定策略批量处理，这个由用户在
+ * 散落清单里逐条点。可能移动或删除磁盘上的目录。
+ */
+export const applyOrphanAction = (path: string, action: OrphanAction) =>
+  call<OrphanActionResult>('apply_orphan_action', { path, action });
 
 // ---- npx skills ----
 
@@ -148,6 +173,8 @@ export const saveProvider = (p: {
   agentKinds: Record<string, string>;
   /** Codex 的 requires_openai_auth 覆盖值；null 表示自动判断 */
   codexRequiresOpenaiAuth: boolean | null;
+  /** Codex 用哪个模型；null 表示回退到 models 的第一个 */
+  codexModel: string | null;
   note: string;
 }) =>
   call<RunResult>('save_provider', {
@@ -160,6 +187,7 @@ export const saveProvider = (p: {
     agents: p.agents,
     agentKinds: p.agentKinds,
     codexRequiresOpenaiAuth: p.codexRequiresOpenaiAuth,
+    codexModel: p.codexModel,
     note: p.note,
   });
 
@@ -213,6 +241,48 @@ export const setClaudeOnboardingSkip = (skip: boolean) =>
  */
 export const setCodexRequiresOpenaiAuth = (providerId: string, value: boolean | null) =>
   call<RunResult>('set_codex_requires_openai_auth', { providerId, value });
+
+/**
+ * 设置某个 provider 分配给 Codex 时用哪个模型，并立刻只重写 Codex 的配置。
+ *
+ * Codex 的模型选择器只列官方目录，自定义 provider 的模型进不去，所以
+ * 「用哪个模型」只能靠 `config.toml` 顶层 `model`。value 为 null 表示
+ * 取消指定，回退到 models 的第一个。
+ */
+export const setCodexModel = (providerId: string, model: string | null) =>
+  call<RunResult>('set_codex_model', { providerId, model });
+
+// ---- Cursor 的自带密钥（BYOK） ----
+//
+// Cursor 的配置在 SQLite 库里、密钥经 safeStorage 加密、写入前必须退出
+// Cursor，所以不走 syncProviders，单独三个命令。见 providers/cursor_db.rs。
+
+/** 读 Cursor 当前的 BYOK 状态。不含密钥原文。 */
+export const cursorByokStatus = () => call<CursorByokState>('cursor_byok_status');
+
+/** 算要让某个 provider 在 Cursor 里生效还差哪些改动。只读。 */
+export const cursorByokPlan = (providerId: string, models: string[] = []) =>
+  call<CursorByokPlan>('cursor_byok_plan', { providerId, models });
+
+/**
+ * 把某个 provider 写进 Cursor。
+ *
+ * models 是要出现在 Cursor 模型选择器里的名字。传空数组表示不动模型列表。
+ * Cursor 正在运行时会被后端拒绝 —— 它开着时会用内存状态覆盖这次写入。
+ */
+export const cursorByokApply = (providerId: string, models: string[] = []) =>
+  call<RunResult>('cursor_byok_apply', { providerId, models });
+
+/**
+ * 从 Cursor 的模型选择器里删掉指定模型。
+ *
+ * 只改 userAddedModels，不动开关、地址、密钥。
+ */
+export const cursorByokRemoveModels = (models: string[]) =>
+  call<RunResult>('cursor_byok_remove_models', { models });
+
+/** 关掉 Cursor 的自带密钥、清空接口地址。密钥留在库里不清。 */
+export const cursorByokReset = () => call<RunResult>('cursor_byok_reset');
 
 // ---- MCP 统一管理 ----
 
@@ -279,3 +349,29 @@ export const setMcpRow = (serverId: string, agents: string[]) =>
 
 /** 从各 agent 现有配置导入 server 到池子。 */
 export const importMcpFromAgents = () => call<RunResult>('import_mcp_from_agents');
+
+// ---- token 用量统计 ----
+
+/**
+ * 统计各 agent 的 token 用量。
+ *
+ * days 是窗口天数，0 表示不限。只有已启用的 agent 才会被读盘，
+ * 没启用的连数据源都不碰。
+ *
+ * refresh 为真时丢掉全部缓存从头重算。平时统计是增量的：只读会话文件
+ * 新追加的字节、只查 Cursor 库里新插入的行，所以第二次打开几乎是瞬时的。
+ *
+ * 异步执行：全量重算要读 GB 级的库（pi 595 MB + Cursor 4.2 GB），
+ * 耗时几十秒；增量通常不到半秒。
+ */
+export const usageReport = (days: number, refresh = false) =>
+  call<UsageReport>('usage_report', { days, refresh });
+
+/**
+ * 打开或关闭某个 agent 的用量统计。
+ *
+ * 只写 `~/.agents/agentcenter.toml` 的 `[usage] enabled` 名单，
+ * 不读任何用量数据。要看到数字还得再调一次 usageReport。
+ */
+export const setUsageEnabled = (agent: string, on: boolean) =>
+  call<RunResult>('set_usage_enabled', { agent, on });

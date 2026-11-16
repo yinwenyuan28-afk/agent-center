@@ -66,6 +66,8 @@ pub struct Mapping {
     pub health: HealthState,
     /// 该 agent 的配置目录是否存在。false 表示工具未安装，同步时跳过
     pub installed: bool,
+    /// 用户取消了这个映射。为 true 时目标已删掉，同步也不会再建回来
+    pub disabled: bool,
     /// 补充说明
     pub note: Option<String>,
 }
@@ -94,6 +96,7 @@ pub struct Skill {
 
 /// 散落在别的 agent 目录里、尚未收进 `~/.agents` 的 skill。
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OrphanSkill {
     pub name: String,
     /// 出现在哪个 agent 目录，如 `.cursor/skills`
@@ -102,6 +105,14 @@ pub struct OrphanSkill {
     pub path: String,
     /// 与中心库同名 skill 的比对结果
     pub relation: OrphanRelation,
+    /// 散落这一份的 SKILL.md 描述。冲突时用来和中心库那份对照
+    pub description: String,
+    /// 目录内文件数
+    pub file_count: usize,
+    /// 目录字节数
+    pub size_bytes: u64,
+    /// 内容指纹前 8 位
+    pub hash: String,
 }
 
 /// 散落副本与中心库的关系。
@@ -116,6 +127,40 @@ pub enum OrphanRelation {
     Conflict,
     /// 是个坏掉的链接，只报告
     BrokenLink,
+}
+
+/// 用户对一条散落 skill 选定的处置方式。
+///
+/// 界面上每个散落条目按 `relation` 给出可选项，用户点哪个就走哪个。
+/// 没有「保留不动」这一项 —— 那就是不点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OrphanAction {
+    /// 移入中心库，并在原位置建链接指回来（agent 仍能读到）
+    Import,
+    /// 中心库那份留着，把散落副本删掉，原位置改建链接
+    Dedupe,
+    /// 冲突时采用散落这一份：覆盖中心库同名目录，原位置改建链接
+    TakeOrphan,
+    /// 冲突时采用中心库那一份：删掉散落目录，原位置改建链接
+    TakeShared,
+    /// 只删掉散落的那份，不建链接（彻底断开）
+    Delete,
+    /// 坏链接：删掉链接文件本身，不碰任何真实内容
+    RemoveLink,
+}
+
+/// 一条处置执行结果。界面把它逐条显示在 dialog 下方。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrphanActionResult {
+    pub name: String,
+    pub path: String,
+    /// 用的哪种处置
+    pub action: OrphanAction,
+    pub ok: bool,
+    /// 人话说明，成功或失败都写这里
+    pub message: String,
 }
 
 /// 一次 collect 操作的完整计划，dry-run 时就是这个结构。
@@ -455,6 +500,11 @@ pub struct ProviderView {
     /// `null` 表示交给注入器按盘上登录态自动判断；`true` / `false` 是用户
     /// 在界面上强制指定。
     pub codex_requires_openai_auth: Option<bool>,
+    /// 分配给 Codex 时写进 `config.toml` 顶层 `model` 的模型 id。
+    ///
+    /// Codex 的模型选择器只列官方目录，自定义 provider 的模型进不去，
+    /// 所以只能靠这个字段决定用哪个。`None` 表示回退到 `models` 的第一个。
+    pub codex_model: Option<String>,
     pub note: String,
     /// key 长度，用于界面提示"已配置"
     pub key_len: usize,
@@ -521,6 +571,52 @@ pub struct ProviderSyncReport {
     pub skipped: Vec<String>,
     pub backups: Vec<String>,
     pub log: Vec<String>,
+}
+
+// ---- Cursor 的自带密钥（BYOK） ----
+
+/// Cursor 当前的 BYOK 配置，界面展示用。
+///
+/// **不含密钥原文**。只给长度和末尾 4 位，和 provider 列表的规则一致。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorByokState {
+    /// Cursor 库文件存在
+    pub installed: bool,
+    /// `Use OpenAI API Key` 开关。false 时自定义模型一定用不了
+    pub use_openai_key: bool,
+    /// 当前接口地址；null 表示没覆盖，走 OpenAI 官方
+    pub base_url: Option<String>,
+    /// 库里存着的密钥长度。0 表示没存过
+    pub key_len: usize,
+    /// 密钥末尾 4 位，方便核对是不是同一把
+    pub key_tail: String,
+    /// 已添加的自定义模型名
+    pub user_added_models: Vec<String>,
+    /// 库文件路径
+    pub db_path: String,
+    /// Cursor 进程是否在运行。运行中不允许写入
+    pub running: bool,
+}
+
+/// Cursor 还差哪些改动才能让某个 provider 生效。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorByokPlan {
+    /// 要打开/关闭总开关时给出目标值
+    pub set_use_openai_key: Option<bool>,
+    /// 要改接口地址时给出目标值
+    pub set_base_url: Option<String>,
+    /// 要不要写密钥
+    pub write_key: bool,
+    /// 要加进模型选择器的名字
+    pub add_models: Vec<String>,
+    /// 要从模型选择器里删掉的名字
+    pub remove_models: Vec<String>,
+    /// 面向人的说明，一行一条
+    pub summary: Vec<String>,
+    /// 什么都不用做
+    pub noop: bool,
 }
 
 // ---- MCP 统一管理 ----
@@ -624,4 +720,111 @@ pub struct McpMatrix {
     pub rows: Vec<MatrixRow>,
     /// 池子是空的
     pub empty: bool,
+}
+
+// ---- token 用量统计 ----
+
+/// 一条按 天 × agent × 模型 聚合的用量。
+///
+/// `input` 是**归一后**的输入量：含缓存命中的部分。
+///
+/// 四个 agent 的原始口径不一致，直接相加会算错：
+/// - pi：`input` 不含缓存（`total = input + output + cacheRead + cacheWrite`）
+/// - zcode / codex：`input` 已含缓存读取，缓存是它的子集
+/// - claude：`input` 不含缓存，`cache_read` / `cache_creation` 另计
+///
+/// 统一折算成「输入含缓存」后，四家的数字才可比。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageRow {
+    /// 本地日期，形如 `2026-11-12`
+    pub date: String,
+    /// agent 标识，如 `zcode`
+    pub agent: String,
+    /// 模型标识，如 `deepseek/deepseek-v4.1-flash`
+    pub model: String,
+    /// 输入 token，已归一为「含缓存命中」
+    pub input: u64,
+    /// 输出 token
+    pub output: u64,
+    /// 请求次数（一次模型调用算一次，不含打印等非模型动作）
+    pub calls: u64,
+}
+
+/// 一个 agent 的统计状态：能不能统计、开没开、读到了多少条。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageAgentStatus {
+    /// agent 标识
+    pub agent: String,
+    /// 展示名
+    pub label: String,
+    /// 这个 agent 有没有实现用量采集
+    pub supported: bool,
+    /// 用户是否勾选了「纳入统计」
+    pub enabled: bool,
+    /// 数据源在不在（本机有没有对应的库或目录）
+    pub available: bool,
+    /// 数据源位置，给用户看
+    pub source: String,
+    /// 口径说明或限制，如「Codex 压缩过的历史文件未纳入」
+    pub note: String,
+    /// 本次实际读到的用量记录条数
+    pub records: u64,
+    /// 读取失败的原因。空串表示正常
+    pub error: String,
+}
+
+/// 用量统计结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReport {
+    /// 统计窗口天数。0 表示不限
+    pub days: u32,
+    /// 每个 agent 的状态，顺序同侧栏
+    pub agents: Vec<UsageAgentStatus>,
+    /// 按天聚合的明细，日期倒序
+    pub rows: Vec<UsageRow>,
+    /// 折线图与饼图的数据
+    pub charts: UsageCharts,
+}
+
+/// 折线图的一个点：某天某模型的总量。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrendPoint {
+    /// 本地日期 `2026-11-12`
+    pub date: String,
+    /// 模型标识
+    pub model: String,
+    /// 输入 + 输出（归一后）
+    pub tokens: u64,
+}
+
+/// 饼图的一块：某模型的合计与占比。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelShare {
+    pub model: String,
+    /// 输入 + 输出
+    pub tokens: u64,
+    /// 占总量的百分比，0~100，保留一位小数
+    pub percent: f64,
+    /// 调用次数
+    pub calls: u64,
+}
+
+/// 图表数据。与 [`UsageReport`] 分开，因为图表只需要两种视角的汇总，
+/// 不需要按 agent 拆开。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageCharts {
+    /// 折线图每条线的名称，按总量降序
+    pub models: Vec<String>,
+    /// 折线图数据点
+    pub trend: Vec<TrendPoint>,
+    /// 饼图数据，按总量降序
+    pub shares: Vec<ModelShare>,
+    /// 折线图的横轴日期，升序
+    pub dates: Vec<String>,
 }

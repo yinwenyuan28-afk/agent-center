@@ -1,4 +1,4 @@
-//! Hermes Agent（`~/.hermes` 或 `$HERMES_HOME`）。
+﻿//! Hermes Agent（`~/.hermes` 或 `$HERMES_HOME`）。
 //!
 //! 「Hermes」这个名字在本机对应两个东西：
 //!
@@ -20,7 +20,7 @@
 //! [`crate::providers::hermes`] 和 [`crate::mcp::inject::HermesMcpInjector`]。
 
 use super::Agent;
-use crate::mcp::inject::McpFilePlan;
+use crate::mcp::inject::{McpFilePlan, McpInjector};
 use crate::mcp::model::McpServer;
 use crate::mcp::scan::{self as mcp_scan, McpAgentScan};
 use crate::providers::model::{FilePlan, Provider};
@@ -110,6 +110,6 @@ impl Agent for Hermes {
 
     fn mcp_plan(&self, servers: &[&McpServer]) -> anyhow::Result<Vec<McpFilePlan>> {
         let owned: Vec<McpServer> = servers.iter().map(|s| (*s).clone()).collect();
-        crate::mcp::inject::plan_hermes(&owned)
+        crate::mcp::inject::hermes::HermesMcpInjector.plan(&owned)
     }
 }

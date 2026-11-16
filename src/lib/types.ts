@@ -29,6 +29,8 @@ export interface Mapping {
   health: HealthState;
   /** 该 agent 的配置目录是否存在。false 表示工具未安装，同步时会跳过 */
   installed: boolean;
+  /** 用户取消了这个映射。为 true 时目标已删掉，同步也不会再建回来 */
+  disabled: boolean;
   /** 补充说明，如 "内容与母版不同" / "链接目标不存在" */
   note: string | null;
 }
@@ -62,6 +64,41 @@ export interface OrphanSkill {
   path: string;
   /** 与中心库同名 skill 的比对结果 */
   relation: 'unique' | 'identical' | 'conflict' | 'broken-link';
+  /** 散落这一份的 SKILL.md 描述。冲突时用来和中心库那份对照 */
+  description: string;
+  /** 目录内文件数 */
+  fileCount: number;
+  /** 目录字节数 */
+  sizeBytes: number;
+  /** 内容指纹前 8 位 */
+  hash: string;
+}
+
+/**
+ * 用户对一条散落 skill 选定的处置方式。
+ *
+ * 每个 relation 可用的动作：
+ * - unique        → import（移入）/ delete（删掉）
+ * - identical     → dedupe（用中心库那份，原位置建链接）/ delete
+ * - conflict      → take-orphan（采用散落版）/ take-shared（采用中心库版）/ delete
+ * - broken-link   → remove-link
+ */
+export type OrphanAction =
+  | 'import'
+  | 'dedupe'
+  | 'take-orphan'
+  | 'take-shared'
+  | 'delete'
+  | 'remove-link';
+
+/** 一条处置的执行结果。 */
+export interface OrphanActionResult {
+  name: string;
+  path: string;
+  action: OrphanAction;
+  ok: boolean;
+  /** 人话说明，成功或失败都写在这里 */
+  message: string;
 }
 
 /** 一次 collect 操作的完整计划，dry-run 时就是这个结构。 */
@@ -249,6 +286,13 @@ export interface ProviderView {
    * null 表示交给注入器按盘上登录态自动判断；true / false 是用户强制指定。
    */
   codexRequiresOpenaiAuth: boolean | null;
+  /**
+   * 分配给 Codex 时写进 `config.toml` 顶层 `model` 的模型 id。
+   *
+   * Codex 的模型选择器只列它自己的官方目录，自定义 provider 的模型进不去，
+   * 所以只能靠这个字段决定用哪个。null 表示回退到 `models` 的第一个。
+   */
+  codexModel: string | null;
   note: string;
   /** key 长度，0 表示没配 */
   keyLen: number;
@@ -303,6 +347,49 @@ export interface ProviderMatrix {
   providers: ProviderView[];
   /** 池子是空的 */
   empty: boolean;
+}
+
+// ---- Cursor 的自带密钥（BYOK） ----
+//
+// Cursor 的配置在 SQLite 库 `state.vscdb` 里，不在任何文本文件，也不参与
+// `providers sync`。所以单独一组类型和命令。同样不含密钥原文。
+
+/** Cursor 当前的 BYOK 配置。 */
+export interface CursorByokState {
+  /** Cursor 库文件存在 */
+  installed: boolean;
+  /** `Use OpenAI API Key` 开关。false 时自定义模型一定用不了 */
+  useOpenaiKey: boolean;
+  /** 当前接口地址；null 表示没覆盖，走 OpenAI 官方 */
+  baseUrl: string | null;
+  /** 库里存着的密钥长度。0 表示没存过 */
+  keyLen: number;
+  /** 密钥末尾 4 位 */
+  keyTail: string;
+  /** 已添加的自定义模型名 */
+  userAddedModels: string[];
+  /** 库文件路径 */
+  dbPath: string;
+  /** Cursor 进程是否在运行。运行中不允许写入 */
+  running: boolean;
+}
+
+/** 要让某个 provider 在 Cursor 里生效，还差哪些改动。 */
+export interface CursorByokPlan {
+  /** 要开关总开关时给出目标值 */
+  setUseOpenaiKey: boolean | null;
+  /** 要改接口地址时给出目标值 */
+  setBaseUrl: string | null;
+  /** 要不要写密钥 */
+  writeKey: boolean;
+  /** 要加进模型选择器的名字 */
+  addModels: string[];
+  /** 要从模型选择器里删掉的名字 */
+  removeModels: string[];
+  /** 面向人的说明，一行一条 */
+  summary: string[];
+  /** 什么都不用做 */
+  noop: boolean;
 }
 
 /** 一条模型回填记录。 */
@@ -423,4 +510,86 @@ export interface McpMatrix {
   rows: MatrixRow[];
   /** 池子是空的 */
   empty: boolean;
+}
+
+// ---- token 用量统计 ----
+
+/**
+ * 一条按 天 × agent × 模型 聚合的用量。
+ *
+ * `input` 是归一后的输入量，**含缓存命中**。四个 agent 的原始口径不一致
+ * （pi 与 claude 的 input 不含缓存，zcode 与 codex 的含），
+ * 后端已经统一折算，界面直接相加不会算错。
+ */
+export interface UsageRow {
+  /** 本地日期，形如 2026-11-12 */
+  date: string;
+  agent: string;
+  model: string;
+  /** 输入 token，含缓存命中 */
+  input: number;
+  output: number;
+  /** 模型调用次数，不含失败和空回包 */
+  calls: number;
+}
+
+/** 一个 agent 的统计状态。 */
+export interface UsageAgentStatus {
+  agent: string;
+  label: string;
+  /** 有没有实现用量采集。false 时开关不可点 */
+  supported: boolean;
+  /** 用户是否勾选了纳入统计 */
+  enabled: boolean;
+  /** 数据源在不在 */
+  available: boolean;
+  /** 数据源位置 */
+  source: string;
+  /** 口径说明或已知限制 */
+  note: string;
+  /** 本次读到的记录条数 */
+  records: number;
+  /** 读取失败原因。空串表示正常 */
+  error: string;
+}
+
+/** 用量统计结果。 */
+export interface UsageReport {
+  /** 统计窗口天数，0 = 不限 */
+  days: number;
+  agents: UsageAgentStatus[];
+  /** 按天聚合的明细，日期倒序 */
+  rows: UsageRow[];
+  /** 折线图与饼图的数据 */
+  charts: UsageCharts;
+}
+
+/** 折线图的一个点：某天某模型的总量。 */
+export interface TrendPoint {
+  /** 本地日期 2026-11-12 */
+  date: string;
+  model: string;
+  /** 输入 + 输出 */
+  tokens: number;
+}
+
+/** 饼图的一块。 */
+export interface ModelShare {
+  model: string;
+  /** 输入 + 输出 */
+  tokens: number;
+  /** 占总量的百分比，0~100 */
+  percent: number;
+  calls: number;
+}
+
+/** 图表数据。 */
+export interface UsageCharts {
+  /** 折线图每条线的名称，按总量降序 */
+  models: string[];
+  trend: TrendPoint[];
+  /** 饼图数据，按总量降序 */
+  shares: ModelShare[];
+  /** 折线图横轴日期，升序 */
+  dates: string[];
 }

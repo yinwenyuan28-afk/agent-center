@@ -30,6 +30,11 @@ toml = "0.8"
 # 改用户的 config.toml 必须用 toml_edit，否则注释和空行全丢
 toml_edit = "0.25"
 
+# DeepSeek Harness 的 cordis.patch.yml 是 YAML 数组，条目可能嵌在
+# insert 分组里，行级编辑做不了，必须完整解析成值再写回。
+# Hermes 的 config.yaml 仍走行级编辑（那里有大量注释不能丢）
+serde_yaml = "0.9"
+
 # 错误处理：库层用 thiserror 定义具体错误，CLI 层用 anyhow 附加上下文
 thiserror = "2"
 anyhow = "1"
@@ -41,14 +46,29 @@ dirs = "5"
 # 内容指纹：比对母版与副本、检测漂移
 sha2 = "0.10"
 
+# 读 ZCode 的用量库（~/.zcode/cli/db/db.sqlite）。
+# bundled 把 SQLite 静态编进来，用户机器不需要装 sqlite3.exe，
+# 也不用担心版本漂移 —— 这个库是别的程序在写的，只读访问必须自己控制。
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# 写 Cursor 的 state.vscdb：它的密钥用 Electron safeStorage 加密
+# （DPAPI 主密钥 + AES-256-GCM），要代写就必须能加密。
+# ring 后端比 openssl 省事：不依赖系统里的 OpenSSL，Windows 上直接静态编进来。
+aes-gcm = "0.10"
+
 # Windows 专用：
-# - AttachConsole 让 release 版 exe 在终端里被调用时能把输出送回父进程控制台
+# - GetConsoleProcessList / GetConsoleWindow / ShowWindow 用来藏掉
+#   双击启动时系统给 console 子系统程序新建的黑窗口
 # - GetFileInformationByHandle 用于判定两个路径是否互为硬链接
+# - CryptUnprotectData 用 DPAPI 解开 Cursor 的 safeStorage 主密钥
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Console",
     "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
 ] }
 
 # 命令行解析

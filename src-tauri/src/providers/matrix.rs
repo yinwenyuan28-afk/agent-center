@@ -44,6 +44,7 @@ fn to_view(p: &Provider) -> ProviderView {
         agents: p.agents.clone(),
         claude_model_map: p.claude_model_map.clone(),
         codex_requires_openai_auth: p.codex_requires_openai_auth,
+        codex_model: p.codex_model.clone(),
         note: p.note.clone(),
         key_len: p.api_key.len(),
         key_tail: if p.api_key.len() >= 4 {

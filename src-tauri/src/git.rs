@@ -6,10 +6,13 @@
 //! 用户的 git 配置、钩子、凭据助手、SSH 密钥全部照常生效。
 //! 用库重新实现一遍这些行为既容易出错，也会让用户困惑
 //! "为什么我的 pre-commit 钩子没跑"。
+//!
+//! 所有 git 调用都走 [`crate::proc`]：主程序是 windows 子系统（无控制台），
+//! 直接起 `git.exe` 会让系统给每个子进程新建控制台窗口 —— 读一次状态要跑
+//! 四条命令，界面上就会连闪四个黑窗口。
 
 use crate::types::{GitChange, GitStatus, RunResult};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// 被管理的仓库：`~/.agents`。
 pub fn repo_dir() -> PathBuf {
@@ -20,10 +23,7 @@ pub fn repo_dir() -> PathBuf {
 
 /// 在仓库目录里执行一条 git 命令。
 fn git(args: &[&str]) -> std::io::Result<std::process::Output> {
-    Command::new("git")
-        .current_dir(repo_dir())
-        .args(args)
-        .output()
+    crate::proc::output("git", args, Some(&repo_dir()))
 }
 
 /// 执行并返回整理后的结果。

@@ -22,12 +22,15 @@ use std::process::Command;
 /// 优先用 PATH 里的全局 `skills`；没有则退回 `npx skills`。
 /// 在 Windows 上 `npx` 是 `.cmd`，必须走 `cmd /C` 才能找到，
 /// 所以这里区分平台。
+///
+/// 一律用 [`crate::proc::new`] 构造：主程序没有控制台，直接起这些
+/// console 子系统的命令会让系统给每个新进程弹黑窗口。
 fn skills_command(args: &[&str]) -> Command {
     let has_global = which_skills();
 
     #[cfg(windows)]
     {
-        let mut cmd = Command::new("cmd");
+        let mut cmd = crate::proc::new("cmd");
         cmd.arg("/C");
         if has_global {
             cmd.arg("skills");
@@ -42,9 +45,9 @@ fn skills_command(args: &[&str]) -> Command {
     #[cfg(not(windows))]
     {
         let mut cmd = if has_global {
-            Command::new("skills")
+            crate::proc::new("skills")
         } else {
-            let mut c = Command::new("npx");
+            let mut c = crate::proc::new("npx");
             c.arg("--yes").arg("skills");
             c
         };
@@ -58,9 +61,9 @@ fn skills_command(args: &[&str]) -> Command {
 /// 检查 PATH 里是否有全局 `skills` 命令。
 fn which_skills() -> bool {
     #[cfg(windows)]
-    let probe = Command::new("cmd").args(["/C", "where skills"]).output();
+    let probe = crate::proc::output("cmd", &["/C", "where skills"], None);
     #[cfg(not(windows))]
-    let probe = Command::new("sh").args(["-c", "command -v skills"]).output();
+    let probe = crate::proc::output("sh", &["-c", "command -v skills"], None);
 
     probe.map(|o| o.status.success()).unwrap_or(false)
 }

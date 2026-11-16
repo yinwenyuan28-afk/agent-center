@@ -184,6 +184,50 @@ pub trait Agent: Send + Sync {
     fn credential_unsupported(&self) -> Option<&'static str> {
         None
     }
+
+    // ---- token 用量统计 ----
+
+    /// 这个 agent 有没有实现用量采集。
+    ///
+    /// 返回 false 的 agent 在统计页上显示为「暂不支持」且开关不可点。
+    /// 目前只有 claude / codex / zcode / pi 四家实现了。
+    fn supports_usage(&self) -> bool {
+        false
+    }
+
+    /// 用量数据源的位置，用于界面展示和「数据源在不在」的判断。
+    ///
+    /// 返回多个是因为 Pi 这类 agent 的会话分散在多层子目录里，
+    /// 展示时要说清扫的是哪个根。
+    fn usage_sources(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    /// 采集用量记录。只读，不写任何文件。
+    ///
+    /// 返回 `None` 表示这个 agent 没实现。实现者应该**自己处理**
+    /// 数据源不存在和读取失败两种情况（返回带 note/error 的
+    /// [`AgentUsage`]），而不是 panic 或返回 Err —— 单个 agent 读不到
+    /// 不该让整页统计失败。
+    ///
+    /// ## 为什么采集器不接收时间窗参数
+    ///
+    /// 本可以按「文件修改时间早于窗口起点就整份跳过」来加速，
+    /// 但这个假设靠不住：用户从备份恢复会话时（`cp -p` 保留原 mtime），
+    /// 文件内容的记录时间会晚于 mtime，那份数据会被静默漏掉。
+    /// 统计少算比慢一点糟得多，所以采集器一律读全量，
+    /// 时间窗过滤交给聚合层（[`crate::usage::build_report`] 里做）。
+    fn usage_collect(&self) -> Option<crate::usage::AgentUsage> {
+        None
+    }
+
+    /// 口径说明，显示在统计页的该 agent 行上。
+    ///
+    /// 四家的原始 token 口径不一致（见 [`crate::usage`] 的模块注释），
+    /// 用户需要知道哪家的数字被折算过、哪家的历史不全。
+    fn usage_note(&self) -> &'static str {
+        ""
+    }
 }
 
 /// 返回全部 agent，按 [`Agent::order`] 排序。

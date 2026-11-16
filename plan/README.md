@@ -10,6 +10,7 @@
 | [providers-management.md](providers-management.md) | provider 统一管理与注入（母版、七个注入器、五道安全闸） | 已实施 |
 | [provider-config-keys.md](provider-config-keys.md) | 各工具改哪个文件、哪些键；CC Switch 已核对，我们的实现标待确认 | 记录 |
 | [provider-models-and-agent-interface.md](provider-models-and-agent-interface.md) | 模型元数据管理 + Agent 接口化重构 | 已实施 |
+| [token-usage-stats.md](token-usage-stats.md) | token 用量统计：四家 session 位置、口径归一、按需读取 | 已实施 |
 
 ## 要解决的问题
 
@@ -104,6 +105,7 @@ instructions = "~/.agents/AGENTS.md"
 agent = "claude"
 to    = "~/.claude/CLAUDE.md"
 mode  = "auto"
+disabled = false        # true = 用户取消了这条，sync 跳过
 
 [[mappings]]
 agent = "zcode"
@@ -151,6 +153,8 @@ qoder / codebuddy / workbuddy 没有单一指令文件（workbuddy 是 SOUL/IDEN
 - 若内容与母版不同，额外提示合并
 - `copy` 模式写 `.agentcenter-manifest.json` 记录 SHA-256，`status` 靠它判断漂移
 - `status` 报三态：`ok` / `drifted` / `broken`
+- 取消映射（`unmap`）走同一套边界：链接只删链接、硬链接只删目录项、改过的副本进备份；
+  同时在配置里记 `disabled = true`，否则下次 `sync` 会立刻建回来
 
 ### skill 收集
 
@@ -162,6 +166,9 @@ qoder / codebuddy / workbuddy 没有单一指令文件（workbuddy 是 SOUL/IDEN
 | 同名且哈希相同 | 删掉副本，原位置建 junction |
 | 同名但内容不同 | **不动**，列进冲突表交用户决定 |
 | 目录是坏的链接 | 只报告，不自动删 |
+
+批量按上表处理（「一键收集」），也可以点「扫描散落 skill」逐条选：移入 / 删副本改链接 /
+采用散落版 / 采用中心库版 / 删除 / 删除坏链接。详见「2026-11-12 映射取消 + 散落 skill 逐条处置」。
 
 ### 集成 npx skills
 
@@ -224,7 +231,57 @@ qoder / codebuddy / workbuddy 没有单一指令文件（workbuddy 是 SOUL/IDEN
 
 ### 待修的问题
 
-- `CollectPlan` 的 `apply_plan` 执行日志目前被丢弃，只返回计划结构。前端 Skills 页的「收集到中心库」按钮因此只显示「收集完成」而没有逐条明细。需要在类型里加日志字段。
+- `CollectPlan` 的 `apply_plan` 执行日志目前被丢弃，只返回计划结构。前端 Skills 页的「一键收集」按钮因此只显示「收集完成」而没有逐条明细 —— 单条处置有逐条回执，批量那个还没有。需要在类型里加日志字段。
+
+### 2026-11-12 映射取消 + 散落 skill 逐条处置
+
+**需求**
+
+1. AGENTS 文档映射要能取消，也就是删掉那条硬链接。
+2. Skills 页点「扫描散落 skill」后弹对话框，列出各 agent 自己目录里散落的 skill，并提供选项逐条处置。
+
+**1. 取消映射**
+
+只删链接是不够的：下一次「同步全部」会立刻把链接建回来，用户会以为按钮没生效。所以取消动作
+是「删文件 + 写标记」两步。
+
+- `link::remove_one` 负责删，边界和 `sync_one` 对称，母版一律不碰：
+  链接 → 只删链接；硬链接 → 删目录项（母版那份仍在）；内容相同的副本 → 直接删；
+  内容不同或被改过 → 移进 `~/.agents/backup/` 再报告位置
+- `agentcenter.toml` 的 `[[mappings]]` 增加 `disabled` 字段。取消时写入，同步时跳过
+- 取消后再恢复，若这条 override 和内置默认完全一致（路径相同、mode 是 auto），整条删掉，
+  配置文件回到「没写过这个 agent」的干净状态，不留 `disabled = false` 的垃圾条目
+- CLI：`agentcenter unmap <agent>` / `agentcenter remap <agent>`；`status` 里已取消的项显示提示且不计入「需处理」
+- 界面：每行一个「取消映射」，确认框写清后果；取消后该行显示「已取消」徽标和「恢复映射」按钮
+
+**2. 散落 skill 逐条处置**
+
+`OrphanSkill` 补了描述、文件数、字节数、指纹四个字段 —— 冲突时用户要靠这些信息判断采用哪一份，
+只给路径看不出来。
+
+新增 `OrphanAction` 六种动作，界面按扫描出的关系只给可用的那几个：
+
+| 关系 | 可选动作 |
+|---|---|
+| `unique` | `import` 移入中心库 / `delete` 删除 |
+| `identical` | `dedupe` 删副本改链接 / `delete` |
+| `conflict` | `take-orphan` 采用散落版 / `take-shared` 采用中心库版 / `delete` |
+| `broken-link` | `remove-link` 删除坏链接 |
+
+`skills::apply_action` 的特点是**每条都重新校验现场**：对话框开着的时候用户完全可能在资源管理器里
+动过文件，不能信任界面拿着的旧扫描结果。采用散落版覆盖中心库时，中心库那份先复制进备份目录。
+
+只有「删除」不进备份 —— 那是用户明确要求的真删除，确认框里写明了这一点。
+
+「一键收集」保留，只处理 `unique` 和 `identical`；冲突仍要人逐条决定。
+
+**验证**
+
+- `link::remove_one` 五种目标形态（硬链接 / 相同副本 / 改过的副本 / 目标不存在 / 不同的目录）
+  用一个临时 example 全部跑通，测试产生的备份已从 `~/.agents/backup/` 回收
+- `cargo check` 无错误无警告；`svelte-check` 0 错误；`npm run build` 通过
+- 界面交互在浏览器预览（假后端）里可验证：取消后状态变「已取消」并出现「恢复映射」，
+  散落对话框按关系给出不同按钮、处置后该条从清单消失并出现在处置记录里
 
 ### 2026-11-09 第三轮改动（用户反馈）
 
@@ -303,6 +360,87 @@ Claude 互斥另用 `providers assign` 双向验证。界面在浏览器里实�
 **修掉的坑**：Codex 在没有 provider 分配时仍会建空表 + 写空 env 脚本，把「无改动」变成
 「写入」；改成没有要分配的就不建表不建脚本，已存在的脚本清成只有注释（留旧 key 会让
 Codex 连错端点）。
+
+### 2026-11-12 修掉双击启动的黑窗口
+
+**现象**：每次启动 `target\release\agentcenter.exe` 都带一个黑窗口。
+
+**根因**：读 PE 头确认 `Subsystem = 3`（console 子系统）。console 子系统程序在
+**进程创建那一刻**就由 Windows 分配控制台 —— 我们的代码还没开始跑，窗口已经被
+画出来了。所以任何「事后隐藏/销毁」都只能缩短它，消不掉闪现。
+
+**试错记录（两条都不行）**
+
+1. `ShowWindow(SW_HIDE)` 隐藏窗口 + `GetConsoleProcessList` 判独占。
+   自动验证不出来：探测脚本连对照组（`cmd /c timeout`）都报 0 个可见控制台。
+   改全量枚举做 A/B 才拿到结论 —— 窗口类名是 `CASCADIA_HOSTING_WINDOW_CLASS`，
+   即 Windows Terminal 托管，`GetConsoleWindow()` 只返回伪句柄，真正的可见窗口
+   归 `WindowsTerminal.exe`，藏不掉。A/B 显示对照组和实验组都新增 1 个可见窗口。
+2. `FreeConsole()` 解绑。A/B 显示新增可见控制台 0 个 —— **机制有效**，但用户
+   实测仍能看到闪现：控制台由系统在启动瞬间创建，解绑发生在其后。证明「减少
+   存活时间」不等于「消除」。
+
+**最终方案**：改成 windows 子系统（PE `Subsystem = 2`），系统根本不分配控制台。
+CLI 输出靠 `console::ensure_output_channel()` 补回：
+
+1. 先看 `GetStdHandle(STD_OUTPUT_HANDLE)` 是否可用。可用就原样返回 —— 它可能指向
+   终端、重定向文件或管道，**不能改绑 `CONOUT$`**，否则重定向和管道全失效。
+2. 不可用才 `AttachConsole(ATTACH_PARENT_PROCESS)` + 重新绑定标准句柄到 `CONOUT$`。
+
+**顺带纠正一条错的旧注释**：`main.rs` 原写着「AttachConsole 在父进程是等待中的 cmd
+时经常拿不到，导致 status 静默失败」。探针实测 AttachConsole 返回 true、CONOUT$ 能
+打开、stdout 写入 flush 均成功。当初静默失败的真实原因是附加后没有重新绑定标准句柄，
+std 缓存的仍是启动时的无效值。
+
+**验证**
+
+| 场景 | 结果 |
+|---|---|
+| PE 头 | `Subsystem = 2`（GUI） |
+| 双击启动黑窗口（A/B 对照 `cmd /c timeout`） | 对照新增 1 个可见控制台，agentcenter 新增 **0** |
+| `agentcenter mappings` 直接运行 | 11 行正常输出 |
+| `agentcenter mappings > out.txt` | 11 行写入文件 |
+| `agentcenter mappings \| findstr` | 管道正常 |
+| `status` 退出码 | 0 正确传回 cmd |
+| 非法子命令退出码 | 2 正确传回 |
+
+新增 `src-tauri/src/console.rs`；`main.rs` 加 `#![windows_subsystem = "windows"]`，
+CLI 分支调用 `ensure_output_channel()`。
+
+### 2026-11-12 修掉点 Git 页时连闪黑窗口
+
+**现象**：改成 GUI 子系统后主窗口不再闪了，但点侧栏「Git」会连闪好几个黑窗口。
+
+**根因**：这是上一步修复的必然副作用。主程序现在没有控制台，而 Windows 的规则是
+「无控制台的进程启动 console 子系统子进程时，系统给子进程新建控制台窗口」。
+`git::status()` 一次要跑四条命令（`rev-parse`、`rev-list`、`remote get-url`、
+`status --porcelain`），所以连闪四个。
+
+**修复**：新增 `src-tauri/src/proc.rs`，提供 `new` / `output` / `status` 三个入口，
+统一给子进程加 `CREATE_NO_WINDOW`（`0x0800_0000`）—— 告诉系统「建控制台但不显示窗口」。
+把全部 7 处裸 `Command::new` 改过来：
+
+| 文件 | 位置 | 子进程 |
+|---|---|---|
+| `git.rs` | `git()` | `git` |
+| `link.rs` | junction 分支 | `cmd /C mklink` |
+| `skillscli.rs` | `skills_command()` / `which_skills()` | `cmd` / `npx` / `skills` / `sh` |
+| `providers/opencode.rs` | 版本探测两处 | `opencode` / `powershell` |
+
+**验证**（关键是父进程必须真的没有控制台，否则子进程会继承终端的控制台，测不出区别）：
+
+写了一个 `#![windows_subsystem = "windows"]` 的探针，和 agentcenter 完全同构，
+内部连跑 3 条真实 git 命令，两种方式各跑一次，采样 9 次取峰值：
+
+| 模式 | 峰值新增可见控制台 |
+|---|---|
+| 裸起（修复前行为） | **1 个** ← 复现问题 |
+| `CREATE_NO_WINDOW`（修复后） | **0 个** |
+
+CLI 回归：`agentcenter status` 输出正常、退出码正确。
+
+**约束**：此后代码里不允许出现裸的 `std::process::Command::new`，新增子进程调用
+必须走 `crate::proc`，否则黑窗口问题会重新出现。
 
 
 

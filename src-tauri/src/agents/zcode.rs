@@ -1,4 +1,4 @@
-//! ZCode。
+﻿//! ZCode。
 //!
 //! 三个能力：指令文件（`AGENTS.md`）、provider、MCP。凭证体检也做。
 //!
@@ -19,7 +19,7 @@
 
 use super::model::{collect, read_json, RawEntry};
 use super::Agent;
-use crate::mcp::inject::McpFilePlan;
+use crate::mcp::inject::{McpFilePlan, McpInjector};
 use crate::mcp::model::McpServer;
 use crate::mcp::scan::{self as mcp_scan, McpAgentScan};
 use crate::providers::model::{FilePlan, Provider};
@@ -106,7 +106,7 @@ impl Agent for ZCode {
 
     fn mcp_plan(&self, servers: &[&McpServer]) -> anyhow::Result<Vec<McpFilePlan>> {
         let owned: Vec<McpServer> = servers.iter().map(|s| (*s).clone()).collect();
-        crate::mcp::inject::plan_zcode(&owned)
+        crate::mcp::inject::zcode::ZCodeMcpInjector.plan(&owned)
     }
 
     fn credential_entries(&self) -> Vec<RawEntry> {
@@ -165,4 +165,103 @@ impl Agent for ZCode {
         }
         out
     }
+
+    // ---- token 用量统计 ----
+
+    fn supports_usage(&self) -> bool {
+        true
+    }
+
+    fn usage_sources(&self) -> Vec<PathBuf> {
+        vec![home_dir().join(".zcode").join("cli").join("db").join("db.sqlite")]
+    }
+
+    fn usage_note(&self) -> &'static str {
+        "数据在 ~/.zcode/cli/db/db.sqlite 的 model_usage 表，按模型调用逐条记录。\
+         只统计 status=completed 的记录（取消和报错的用量是 0）。\
+         原始 input 已含缓存读取。"
+    }
+
+    fn usage_collect(&self) -> Option<crate::usage::AgentUsage> {
+        let db = home_dir().join(".zcode").join("cli").join("db").join("db.sqlite");
+        if !db.exists() {
+            return Some(crate::usage::AgentUsage::unavailable(
+                db.display().to_string(),
+                "没有 db.sqlite，说明还没用过 ZCode CLI",
+            ));
+        }
+
+        match read_zcode_usage(&db) {
+            Ok(records) => Some(crate::usage::AgentUsage {
+                records,
+                available: true,
+                source: db.display().to_string(),
+                note: self.usage_note().to_string(),
+                error: String::new(),
+            }),
+            // 库被占用、schema 变了都会走到这里。返回可用但带 error，
+            // 让界面显示「数据源在，但读失败」，而不是说成没装
+            Err(e) => Some(crate::usage::AgentUsage::failed(
+                db.display().to_string(),
+                e.to_string(),
+            )),
+        }
+    }
+}
+
+/// 从 ZCode 的 sqlite 读用量。
+///
+/// ## 为什么只读打开
+///
+/// 这个库是 ZCode 正在用的活库（1 GB，WAL 模式）。写锁会干扰它，
+/// 所以用 `SQLITE_OPEN_READ_ONLY`。只读模式下 SQLite 仍能读 WAL 里
+/// 尚未 checkpoint 的数据，不会漏掉最新记录。
+///
+/// ## 为什么不用 `mode=ro` URI
+///
+/// rusqlite 的 `open_with_flags` 已经能表达只读，URI 方式还要
+/// 手拼转义路径，在 Windows 上遇到反斜杠容易出错。
+///
+/// ## 口径
+///
+/// 表的 `input_tokens` **已含** `cache_read_input_tokens`（实测
+/// `max(cache_read - input) = 0`，且 `computed_total_tokens` 恒等于
+/// `input_tokens + output_tokens`），所以 `input_includes_cache = true`。
+fn read_zcode_usage(
+    db: &std::path::Path,
+) -> Result<Vec<crate::usage::RawUsage>, Box<dyn std::error::Error>> {
+    use rusqlite::OpenFlags;
+
+    let conn = rusqlite::Connection::open_with_flags(
+        db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+
+    // 只取本次统计用得到的四列。不带 WHERE 时间条件：窗口过滤在
+    // 内存里做，这样进程内缓存对切换时间窗有效，不用反复查库。
+    let mut stmt = conn.prepare(
+        "SELECT started_at, model_id, input_tokens, output_tokens,
+                cache_read_input_tokens, cache_creation_input_tokens
+         FROM model_usage
+         WHERE status = 'completed' AND model_id <> ''",
+    )?;
+
+    let rows = stmt.query_map([], |r| {
+        Ok(crate::usage::RawUsage {
+            at_ms: r.get::<_, i64>(0)?,
+            model: r.get::<_, String>(1)?,
+            input: r.get::<_, i64>(2)?.max(0) as u64,
+            output: r.get::<_, i64>(3)?.max(0) as u64,
+            cache_read: r.get::<_, i64>(4)?.max(0) as u64,
+            cache_write: r.get::<_, i64>(5)?.max(0) as u64,
+            // 已含缓存，不能再加一遍
+            input_includes_cache: true,
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }

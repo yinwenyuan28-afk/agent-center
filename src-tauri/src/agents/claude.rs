@@ -97,7 +97,7 @@ impl Agent for Claude {
 
     fn mcp_plan(&self, servers: &[&McpServer]) -> anyhow::Result<Vec<McpFilePlan>> {
         let owned: Vec<McpServer> = servers.iter().map(|s| (*s).clone()).collect();
-        mcp_inject::plan_servers_map(&home_dir().join(".claude.json"), "claude", &owned)
+        mcp_inject::map_agent::plan_map(&mcp_inject::map_agent::claude(), &owned)
     }
 
     // ---- 凭证体检 ----
@@ -135,4 +135,93 @@ impl Agent for Claude {
         );
         out
     }
+
+    // ---- token 用量统计 ----
+
+    fn supports_usage(&self) -> bool {
+        true
+    }
+
+    fn usage_sources(&self) -> Vec<PathBuf> {
+        vec![home_dir().join(".claude").join("projects")]
+    }
+
+    fn usage_note(&self) -> &'static str {
+        "会话文件在 ~/.claude/projects/<项目>/<会话>.jsonl。\
+         只统计 assistant 消息；报错消息（model 为 <synthetic>）不计入。\
+         原始 input 不含缓存，已折算为含缓存。"
+    }
+
+    fn usage_collect(&self) -> Option<crate::usage::AgentUsage> {
+        let root = home_dir().join(".claude").join("projects");
+        if !root.exists() {
+            return Some(crate::usage::AgentUsage::unavailable(
+                root.display().to_string(),
+                "没有会话目录，说明还没用过 Claude Code",
+            ));
+        }
+
+        let files = crate::usage::walk_files(&root, ".jsonl");
+        let mut records = Vec::new();
+
+        for path in &files {
+            // 增量：只读上次之后新追加的字节
+            let parsed = crate::usage::cache::cached_jsonl("claude", path, |v, out| {
+                parse_claude_line(v, out)
+            });
+            records.extend(parsed);
+        }
+
+        Some(crate::usage::AgentUsage {
+            records,
+            available: true,
+            source: root.display().to_string(),
+            note: self.usage_note().to_string(),
+            error: String::new(),
+        })
+    }
+}
+
+/// 解析 Claude 会话文件里的一行，有 assistant 用量就推一条记录。
+///
+/// 结构：每行一个事件，用量在 `type == "assistant"` 的
+/// `message.usage` 里。`message.model` 是模型名。
+///
+/// 两处必须过滤：
+/// - `model == "<synthetic>"`：本地生成的报错消息，没有真实调用，用量全 0
+/// - 用量全 0 且没有 model：占位记录
+///
+/// 注意 Claude 的 input **不含**缓存，`cache_read` / `cache_creation`
+/// 是独立字段，所以 `input_includes_cache = false`。
+fn parse_claude_line(v: &serde_json::Value, out: &mut Vec<crate::usage::RawUsage>) {
+    if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+        return;
+    }
+    let Some(msg) = v.get("message") else { return };
+    let Some(usage) = msg.get("usage") else { return };
+
+    let model = msg.get("model").and_then(|m| m.as_str()).unwrap_or("");
+    // <synthetic> 是 Claude 自己造的报错/提示消息，不消耗模型额度
+    if model.is_empty() || model == "<synthetic>" {
+        return;
+    }
+
+    let num = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+
+    let timestamp = v
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .and_then(crate::usage::iso_to_ms);
+    let Some(at_ms) = timestamp else { return };
+
+    out.push(crate::usage::RawUsage {
+        at_ms,
+        model: model.to_string(),
+        input: num("input_tokens"),
+        output: num("output_tokens"),
+        cache_read: num("cache_read_input_tokens"),
+        cache_write: num("cache_creation_input_tokens"),
+        // Claude 的 input 不含缓存，需要加回去
+        input_includes_cache: false,
+    });
 }

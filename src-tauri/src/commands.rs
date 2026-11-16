@@ -40,6 +40,12 @@ fn sync_mappings_inner(dry_run: bool) -> Result<RunResult, String> {
     let mut skipped = 0;
 
     for m in &resolved {
+        if m.disabled {
+            log.push(format!("[跳过] {}: 已取消映射", m.label));
+            skipped += 1;
+            continue;
+        }
+
         if !m.config_dir.exists() {
             log.push(format!("[跳过] {}: 配置目录不存在", m.label));
             skipped += 1;
@@ -93,6 +99,76 @@ fn repair_mapping_inner(agent: String) -> Result<RunResult, String> {
     match link::sync_one(m) {
         Ok((kind, note)) => Ok(RunResult::success(format!(
             "[{}] {kind:?} — {note}",
+            m.label
+        ))),
+        Err(e) => Ok(RunResult::failure(1, format!("[{}] {e}", m.label))),
+    }
+}
+
+/// 取消某个 agent 的映射：删掉目标位置的链接或副本，并记下「已取消」。
+///
+/// 为什么必须记下来：只删链接的话，下一次「同步全部」会立刻把它建回来，
+/// 用户会以为按钮没生效。标记写在配置文件里，同步时跳过。
+///
+/// 删除动作本身遵守 [`link::remove_one`] 的边界：母版一律不碰，
+/// 内容被改过的目标移进备份目录而不是直接删。
+#[tauri::command]
+pub async fn unmap(agent: String) -> Result<RunResult, String> {
+    tauri::async_runtime::spawn_blocking(move || unmap_inner(agent))
+        .await
+        .map_err(|e| format!("取消映射失败：{e}"))?
+}
+
+fn unmap_inner(agent: String) -> Result<RunResult, String> {
+    let mut cfg = Config::load().map_err(|e| e.to_string())?;
+    let resolved = cfg.resolved_mappings();
+
+    let Some(m) = resolved.iter().find(|m| m.agent == agent) else {
+        return Ok(RunResult::failure(1, format!("找不到 agent：{agent}")));
+    };
+
+    // 先删文件再写配置。反过来会出现「标记已取消但链接还在」，
+    // 而且文件删除失败时用户还能重试。
+    let note = match link::remove_one(m) {
+        Ok(note) => note,
+        Err(e) => return Ok(RunResult::failure(1, format!("[{}] {e}", m.label))),
+    };
+
+    cfg.set_mapping_disabled(&agent, true)
+        .map_err(|e| e.to_string())?;
+    cfg.save().map_err(|e| e.to_string())?;
+
+    Ok(RunResult::success(format!(
+        "[{}] 已取消映射：{note}\n下次同步会跳过，点「恢复映射」可以重新建立",
+        m.label
+    )))
+}
+
+/// 恢复某个被取消的映射：清掉「已取消」标记并立刻重建链接。
+#[tauri::command]
+pub async fn remap(agent: String) -> Result<RunResult, String> {
+    tauri::async_runtime::spawn_blocking(move || remap_inner(agent))
+        .await
+        .map_err(|e| format!("恢复映射失败：{e}"))?
+}
+
+fn remap_inner(agent: String) -> Result<RunResult, String> {
+    let mut cfg = Config::load().map_err(|e| e.to_string())?;
+
+    cfg.set_mapping_disabled(&agent, false)
+        .map_err(|e| e.to_string())?;
+    cfg.save().map_err(|e| e.to_string())?;
+
+    // 重新读一遍，让 resolved 里的 disabled 已经是 false
+    let cfg = Config::load().map_err(|e| e.to_string())?;
+    let resolved = cfg.resolved_mappings();
+    let Some(m) = resolved.iter().find(|m| m.agent == agent) else {
+        return Ok(RunResult::failure(1, format!("找不到 agent：{agent}")));
+    };
+
+    match link::sync_one(m) {
+        Ok((kind, note)) => Ok(RunResult::success(format!(
+            "[{}] 已恢复映射：{kind:?} — {note}",
             m.label
         ))),
         Err(e) => Ok(RunResult::failure(1, format!("[{}] {e}", m.label))),
@@ -174,6 +250,23 @@ pub fn collect_skills(apply: bool) -> Result<CollectPlan, String> {
     }
 
     Ok(plan)
+}
+
+/// 对一条散落 skill 执行用户选定的处置。
+///
+/// 与 `collect_skills` 的区别：那个按关系套固定策略批量处理，
+/// 这个由用户在散落清单 dialog 里逐条点。可能移动或删除目录，
+/// 所以走 spawn_blocking，避免磁盘操作卡住界面。
+#[tauri::command]
+pub async fn apply_orphan_action(
+    path: String,
+    action: crate::types::OrphanAction,
+) -> Result<crate::types::OrphanActionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(crate::skills::apply_action(&path, action))
+    })
+    .await
+    .map_err(|e| format!("处置失败：{e}"))?
 }
 
 /// 读取 lock 文件里的受管 skill 清单。
@@ -273,6 +366,7 @@ fn list_providers_inner() -> Result<Vec<crate::types::ProviderView>, String> {
                 agents: p.agents,
                 claude_model_map: p.claude_model_map,
                 codex_requires_openai_auth: p.codex_requires_openai_auth,
+                codex_model: p.codex_model,
                 note: p.note,
                 key_len: p.api_key.len(),
                 key_tail: if p.api_key.len() >= 4 { tail } else { String::new() },
@@ -306,6 +400,9 @@ pub fn save_provider(
     // Codex 的 requires_openai_auth 覆盖值：null 表示交给注入器自动判断。
     // 前端每次保存都会把它原样带回，否则编辑其他字段时会把这个设置洗掉。
     codex_requires_openai_auth: Option<bool>,
+    // Codex 用哪个模型。null 表示沿用 models 的第一个。
+    // 和上面的开关一样，前端每次保存都要原样带回。
+    codex_model: Option<String>,
     note: String,
 ) -> Result<RunResult, String> {
     let mut list = crate::providers::store::load_or_default().map_err(|e| e.to_string())?;
@@ -334,6 +431,10 @@ pub fn save_provider(
             existing.models = models;
             existing.agents = agents;
             existing.codex_requires_openai_auth = codex_requires_openai_auth;
+            // 只接受还存在于 models 里的名字，避免编辑模型列表后留下悬空引用
+            existing.codex_model = codex_model.filter(|m| {
+                !m.trim().is_empty() && existing.models.iter().any(|x| x.id == *m)
+            });
             // 编辑表单不改 Claude 映射；映射由分配弹窗单独写
             existing.note = note;
         }
@@ -341,6 +442,10 @@ pub fn save_provider(
             if api_key.trim().is_empty() {
                 return Ok(RunResult::failure(1, "新增 provider 必须提供 API key"));
             }
+            // 先筛出有效的模型引用，再构造结构体 —— models 在字面量里会被 move
+            let picked = codex_model.filter(|m| {
+                !m.trim().is_empty() && models.iter().any(|x| x.id == *m)
+            });
             list.push(crate::providers::model::Provider {
                 id: id.clone(),
                 name,
@@ -352,6 +457,7 @@ pub fn save_provider(
                 agents,
                 claude_model_map: crate::types::ClaudeModelMap::default(),
                 codex_requires_openai_auth,
+                codex_model: picked,
                 note,
             });
         }
@@ -516,6 +622,36 @@ pub fn set_codex_requires_openai_auth(
     provider_id: String,
     value: Option<bool>,
 ) -> Result<RunResult, String> {
+    set_codex_field(provider_id, |p| p.codex_requires_openai_auth = value)
+}
+
+/// 设置某个 provider 分配给 Codex 时用哪个模型，并立刻写入 Codex 配置。
+///
+/// Codex 的模型选择器只列它自己的官方目录，自定义 provider 的模型进不去。
+/// 「用哪个模型」只能靠 `config.toml` 顶层 `model` 这个键，所以这里改的是
+/// 母版里的 `codex_model`，再由注入器写进配置文件。
+///
+/// 传空字符串或 null 表示取消指定，回退到 `models` 的第一个。
+#[tauri::command]
+pub fn set_codex_model(provider_id: String, model: Option<String>) -> Result<RunResult, String> {
+    let clean = model
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty());
+    set_codex_field(provider_id, |p| p.codex_model = clean)
+}
+
+/// 改 Codex 相关的单个字段，然后只重写 `~/.codex/config.toml`。
+///
+/// 两个 Codex 专属设置（后端开关、用哪个模型）共用这段：都是「只改母版
+/// 一条的一个字段 + 只注入 codex 一家」。抽出来是为了让写入流程只写一遍 ——
+/// 前端为了改一个值去拼整个 provider 很容易漏字段，把别的设置洗掉。
+///
+/// 参数 `apply` 在拿到目标 provider 后执行，负责把新值写进内存里的列表。
+/// 返回写入日志，失败时返回 `RunResult::failure`。
+fn set_codex_field(
+    provider_id: String,
+    apply: impl FnOnce(&mut crate::providers::model::Provider),
+) -> Result<RunResult, String> {
     let mut list = crate::providers::store::load_or_default().map_err(|e| e.to_string())?;
     let Some(target) = list.iter_mut().find(|p| p.id == provider_id) else {
         return Ok(RunResult::failure(
@@ -523,7 +659,7 @@ pub fn set_codex_requires_openai_auth(
             format!("母版里没有 provider：{provider_id}"),
         ));
     };
-    target.codex_requires_openai_auth = value;
+    apply(target);
     crate::providers::store::save(&list).map_err(|e| e.to_string())?;
 
     // 只重写 codex 一家的配置
@@ -555,6 +691,144 @@ pub fn set_codex_requires_openai_auth(
     }
 
     Ok(RunResult::success(lines.join("\n")))
+}
+
+/// 读 Cursor 的自带密钥（BYOK）状态。
+///
+/// Cursor 的配置在 SQLite 库 `state.vscdb` 里，不在任何文本文件，
+/// 也不参与 `providers sync`。所以单独一组命令，界面上单独一块。
+///
+/// 返回结果不含密钥原文，只有长度和末尾 4 位。
+#[tauri::command]
+pub fn cursor_byok_status() -> Result<crate::types::CursorByokState, String> {
+    crate::providers::cursor_db::state_view().map_err(|e| e.to_string())
+}
+
+/// 算「要让某个 provider 在 Cursor 里生效，还差哪些改动」。只读。
+///
+/// `models` 是希望出现在 Cursor 模型选择器里的名字。省略表示不管模型。
+#[tauri::command]
+pub fn cursor_byok_plan(
+    provider_id: String,
+    models: Option<Vec<String>>,
+) -> Result<crate::types::CursorByokPlan, String> {
+    let (base_url, key) = read_provider_secret(&provider_id)?;
+    crate::providers::cursor_db::plan_view(&base_url, &key, &models.unwrap_or_default())
+        .map_err(|e| e.to_string())
+}
+
+/// 把某个 provider 写进 Cursor。要求 Cursor 已完全退出。
+///
+/// `models` 是希望出现在 Cursor 模型选择器里的名字。省略表示不动模型列表
+/// —— 母版里一条 provider 往往有好几个模型，不能靠空列表猜用户要哪个。
+///
+/// `force` 只该在写副本时用。界面上不给这个入口 —— 用户点了写入就
+/// 应该先关掉 Cursor，这是唯一的正确做法。
+#[tauri::command]
+pub fn cursor_byok_apply(
+    provider_id: String,
+    models: Option<Vec<String>>,
+) -> Result<RunResult, String> {
+    let (base_url, key) = read_provider_secret(&provider_id)?;
+
+    let plan = match crate::providers::cursor_db::plan(&base_url, &key, &models.unwrap_or_default())
+    {
+        Ok(p) => p,
+        Err(e) => return Ok(RunResult::failure(1, format!("无法生成计划：{e}"))),
+    };
+
+    if plan.is_noop() {
+        return Ok(RunResult::success(format!(
+            "Cursor 的配置已经和 {provider_id} 一致，无需改动。"
+        )));
+    }
+
+    // 进程检查和真正的写入都在 apply 里做，这里不再重复判断 ——
+    // 否则会出现「界面上说不行、实际能写」这种两处结论不一致的情况
+    match crate::providers::cursor_db::apply(&plan, &key, false) {
+        Ok(lines) => {
+            let mut out = Vec::new();
+            out.push(format!("已写入 Cursor（{provider_id}）："));
+            for l in &lines {
+                out.push(format!("  - {l}"));
+            }
+            out.push(String::new());
+            out.push("重启 Cursor 后生效。".to_string());
+            Ok(RunResult::success(out.join("\n")))
+        }
+        Err(e) => Ok(RunResult::failure(1, e.to_string())),
+    }
+}
+
+/// 从 Cursor 的模型选择器里删掉指定模型。
+///
+/// 只改 `userAddedModels` 这一项，不动开关、地址、密钥 —— 删一个模型
+/// 不该顺带重写接口配置。
+#[tauri::command]
+pub fn cursor_byok_remove_models(models: Vec<String>) -> Result<RunResult, String> {
+    if models.is_empty() {
+        return Ok(RunResult::failure(1, "没有指定要删的模型".to_string()));
+    }
+
+    let plan = crate::providers::cursor_db::plan_remove_models(&models);
+    match crate::providers::cursor_db::apply(&plan, "", false) {
+        Ok(lines) => {
+            let mut out = vec!["已更新 Cursor 的模型选择器：".to_string()];
+            for l in &lines {
+                out.push(format!("  - {l}"));
+            }
+            out.push(String::new());
+            out.push("重启 Cursor 后生效。".to_string());
+            Ok(RunResult::success(out.join("\n")))
+        }
+        Err(e) => Ok(RunResult::failure(1, e.to_string())),
+    }
+}
+
+/// 让 Cursor 回到「不用自带密钥」：关总开关、清接口地址。
+///
+/// 密钥留在库里不清 —— 下次再启用时不用重填。
+#[tauri::command]
+pub fn cursor_byok_reset() -> Result<RunResult, String> {
+    let plan = crate::providers::cursor_db::CursorPlan {
+        set_use_openai_key: Some(false),
+        set_base_url: Some(String::new()),
+        write_key: false,
+        add_models: Vec::new(),
+        remove_models: Vec::new(),
+        summary: vec!["关闭自带密钥，清空接口地址".into()],
+    };
+
+    match crate::providers::cursor_db::apply(&plan, "", false) {
+        Ok(lines) => {
+            let mut out = vec!["已重置 Cursor：".to_string()];
+            for l in &lines {
+                out.push(format!("  - {l}"));
+            }
+            out.push(String::new());
+            out.push("重启 Cursor 后回到官方模型。".to_string());
+            Ok(RunResult::success(out.join("\n")))
+        }
+        Err(e) => Ok(RunResult::failure(1, e.to_string())),
+    }
+}
+
+/// 从母版取某个 provider 的接口地址和密钥。
+///
+/// 三个 Cursor 命令都要这两项，缺失时的报错也只写一遍。
+/// 密钥只在这个进程内流转，不返回给前端。
+fn read_provider_secret(id: &str) -> Result<(String, String), String> {
+    let list = crate::providers::store::load_or_default().map_err(|e| e.to_string())?;
+    let Some(p) = list.iter().find(|p| p.id == id) else {
+        return Err(format!("母版里没有 provider：{id}"));
+    };
+    if p.base_url.trim().is_empty() {
+        return Err(format!("provider {id} 没有 base_url，Cursor 需要它"));
+    }
+    if p.api_key.trim().is_empty() {
+        return Err(format!("provider {id} 没有 api_key，Cursor 需要它"));
+    }
+    Ok((p.base_url.clone(), p.api_key.clone()))
 }
 
 /// 读 Claude Code 的首次引导状态。
@@ -840,6 +1114,39 @@ pub fn import_mcp_from_agents() -> Result<RunResult, String> {
                 )))
             }
         }
+        Err(e) => Ok(RunResult::failure(1, e.to_string())),
+    }
+}
+
+// ---- token 用量统计 ----
+
+/// 统计各 agent 的 token 用量。
+///
+/// `days` 是统计窗口天数，0 表示不限。
+/// `refresh` 为真时先丢掉全部缓存，从头重算 —— 界面上对应「重算」按钮，
+/// 用户怀疑数字不对时用。平时统计是增量的，只读新增的数据。
+///
+/// 异步执行：启用的 agent 越多、会话文件越大，读盘时间越长
+/// （本机 pi 595 MB + codex 191 MB + Cursor 的 4.2 GB 库）。
+/// 放在 IPC 线程上会直接卡住界面。
+#[tauri::command]
+pub async fn usage_report(days: u32, refresh: bool) -> Result<crate::types::UsageReport, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::usage::collect_report(days, refresh))
+        .await
+        .map_err(|e| format!("统计失败：{e}"))
+}
+
+/// 打开或关闭某个 agent 的用量统计。
+///
+/// 写的是 `~/.agents/agentcenter.toml` 的 `[usage] enabled` 名单。
+/// 只改配置，不读任何用量数据 —— 打开之后要等下一次 `usage_report` 才见数字。
+#[tauri::command]
+pub fn set_usage_enabled(agent: String, on: bool) -> Result<RunResult, String> {
+    match crate::usage::set_enabled(&agent, on) {
+        Ok(now) => Ok(RunResult::success(format!(
+            "{agent} 的用量统计已{}",
+            if now { "启用" } else { "关闭" }
+        ))),
         Err(e) => Ok(RunResult::failure(1, e.to_string())),
     }
 }

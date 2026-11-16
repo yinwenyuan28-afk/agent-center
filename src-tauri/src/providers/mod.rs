@@ -15,6 +15,7 @@ pub mod claude;
 pub mod claude_bridge;
 pub mod claude_onboarding;
 pub mod codex;
+pub mod cursor_db;
 pub mod diff;
 pub mod dsh;
 pub mod gemini;

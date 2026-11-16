@@ -19,6 +19,13 @@ pub struct MappingConfig {
     /// 链接方式，默认 auto
     #[serde(default = "default_mode")]
     pub mode: LinkMode,
+    /// 用户主动取消了这个映射。
+    ///
+    /// 取消映射会把目标位置的链接或副本删掉。如果只删不记，下一次
+    /// 「同步全部」会立刻把它建回来，用户会以为按钮没生效。所以
+    /// 取消动作同时写这个标记，同步时跳过。
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 fn default_mode() -> LinkMode {
@@ -58,6 +65,40 @@ pub struct SkillsConfig {
     pub tags: SkillTags,
 }
 
+/// `[usage]` 段：token 用量统计的开关。
+///
+/// 默认**空名单 = 一个都不统计**。这些 agent 的用量库加起来上 GB，
+/// 读不读、读谁，由用户显式勾选决定，工具不替用户做主。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageConfig {
+    /// 纳入统计的 agent id 列表
+    #[serde(default)]
+    pub enabled: Vec<String>,
+}
+
+impl UsageConfig {
+    /// 某个 agent 是否已启用统计。
+    pub fn is_enabled(&self, agent: &str) -> bool {
+        self.enabled.iter().any(|a| a == agent)
+    }
+
+    /// 打开或关闭某个 agent 的统计，返回操作后的状态。
+    ///
+    /// 幂等：重复打开不会往列表里塞重复项，重复关闭也不会报错。
+    pub fn set_enabled(&mut self, agent: &str, on: bool) -> bool {
+        let present = self.is_enabled(agent);
+        if on && !present {
+            self.enabled.push(agent.to_string());
+            // 排序让写回配置的 diff 稳定，不受点击顺序影响
+            self.enabled.sort();
+            self.enabled.dedup();
+        } else if !on && present {
+            self.enabled.retain(|a| a != agent);
+        }
+        self.is_enabled(agent)
+    }
+}
+
 /// 完整的配置文件结构。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -68,6 +109,9 @@ pub struct Config {
     pub mappings: Vec<MappingConfig>,
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// token 用量统计的启用名单
+    #[serde(default)]
+    pub usage: UsageConfig,
 }
 
 /// 把配置里的 `~` 展开成真实家目录。
@@ -151,9 +195,9 @@ impl Config {
             // 找用户是否覆盖了这个 agent
             let override_cfg = self.mappings.iter().find(|m| m.agent == agent.id());
 
-            let (target, mode) = match override_cfg {
-                Some(m) => (expand_tilde(&m.to), m.mode),
-                None => (default_target, LinkMode::Auto),
+            let (target, mode, disabled) = match override_cfg {
+                Some(m) => (expand_tilde(&m.to), m.mode, m.disabled),
+                None => (default_target, LinkMode::Auto, false),
             };
 
             out.push(ResolvedMapping {
@@ -162,6 +206,7 @@ impl Config {
                 source: self.source_path(),
                 target,
                 mode,
+                disabled,
                 config_dir: agent.config_dir(),
             });
         }
@@ -176,6 +221,7 @@ impl Config {
                     source: self.source_path(),
                     target: expand_tilde(&m.to),
                     mode: m.mode,
+                    disabled: m.disabled,
                     // 自定义 agent 的"是否安装"判断用目标文件所在目录
                     config_dir: expand_tilde(&m.to)
                         .parent()
@@ -199,4 +245,58 @@ pub struct ResolvedMapping {
     pub mode: LinkMode,
     /// 用于判断 agent 是否安装的目录
     pub config_dir: PathBuf,
+    /// 用户是否取消了这个映射。为 true 时同步跳过，界面上显示「已取消」
+    pub disabled: bool,
+}
+
+impl Config {
+    /// 设置某个 agent 的映射是否被取消，返回实际写入后的值。
+    ///
+    /// 用户对内置 agent 只写「覆盖项」，所以这里的第一种情况是：
+    /// 配置里已有该 agent 的条目 → 直接改 `disabled`。
+    /// 第二种情况是配置文件里没有这个 agent（用的是内置默认路径）→
+    /// 补一条完整条目，把默认目标路径和当前模式写进去，避免
+    /// 因为取消一个映射而把用户的默认路径语义改掉。
+    ///
+    /// 取消后再恢复时，若这条 override 的路径和内置默认完全一致，
+    /// 就整条删掉，让配置文件回到「没写过这个 agent」的干净状态。
+    pub fn set_mapping_disabled(&mut self, agent: &str, disabled: bool) -> anyhow::Result<()> {
+        let default_target = crate::agents::find(agent).and_then(|a| a.instruction_file());
+
+        if let Some(idx) = self.mappings.iter().position(|m| m.agent == agent) {
+            // 恢复时，如果这条覆盖项本来就和内置默认一模一样
+            // （很可能是上次取消时补上的），整条删掉，
+            // 让配置文件回到「没写过这个 agent」的干净状态。
+            let removable = !disabled
+                && self.mappings[idx].mode == LinkMode::Auto
+                && default_target
+                    .as_ref()
+                    .map(|d| expand_tilde(&self.mappings[idx].to) == *d)
+                    .unwrap_or(false);
+            if removable {
+                self.mappings.remove(idx);
+            } else {
+                self.mappings[idx].disabled = disabled;
+            }
+            return Ok(());
+        }
+
+        // 配置里还没有这个 agent 的条目
+        if !disabled {
+            // 恢复一个本来就没写过的映射：什么都不用做
+            return Ok(());
+        }
+
+        // 取消：需要落一条覆盖项，带上当前生效的目标路径
+        let default_target = default_target
+            .ok_or_else(|| anyhow::anyhow!("找不到 agent 的指令文件路径：{agent}"))?;
+
+        self.mappings.push(MappingConfig {
+            agent: agent.to_string(),
+            to: contract_tilde(&default_target),
+            mode: LinkMode::Auto,
+            disabled: true,
+        });
+        Ok(())
+    }
 }

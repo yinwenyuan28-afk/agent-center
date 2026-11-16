@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * Skill 更新页：展示 npx skills 管理的第三方 skill 及其更新状态。
+   * Skills 更新页：展示 npx skills 管理的第三方 skill 及其更新状态。
    *
    * 关键约束（来自对 skills CLI 1.7.6 的实测）：
    * - 它记录的"版本"是内容哈希，不是版本号，所以这里不展示 v1.2.3 这种假象
@@ -96,7 +96,7 @@
   const updatable = $derived(managed.filter((m) => m.hasUpdate === true).length);
 </script>
 
-<PageHead title="Skill 更新">
+<PageHead title="Skills 更新">
   由 <code class="font-[var(--font-mono)] text-[12px]">npx skills</code> 安装的第三方 skill。这里记录的是来源仓库和内容指纹，不是语义版本号——那套 CLI 本身只按目录树哈希判断有没有变化。
 </PageHead>
 

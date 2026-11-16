@@ -1,4 +1,4 @@
-//! Gemini CLI。
+﻿//! Gemini CLI。
 //!
 //! ## provider：单槽位
 //!
@@ -10,6 +10,9 @@
 //! 装好之后要按真实文件核对。
 
 use super::Agent;
+use crate::mcp::inject::{McpFilePlan, McpInjector};
+use crate::mcp::model::McpServer;
+use crate::mcp::scan::{self as mcp_scan, McpAgentScan};
 use crate::providers::model::{FilePlan, Provider};
 use crate::providers::scan::AgentScan;
 use crate::providers::store::home_dir;
@@ -82,6 +85,25 @@ impl Agent for Gemini {
     fn provider_plan(&self, providers: &[Provider]) -> anyhow::Result<Vec<FilePlan>> {
         use crate::providers::Injector;
         crate::providers::gemini::GeminiInjector.plan(providers)
+    }
+
+    // ---- MCP ----
+
+    fn supports_mcp(&self) -> bool {
+        true
+    }
+
+    fn mcp_ready(&self) -> bool {
+        crate::mcp::inject::gemini::config_path().exists()
+    }
+
+    fn mcp_scan(&self) -> Option<McpAgentScan> {
+        Some(mcp_scan::scan_gemini())
+    }
+
+    fn mcp_plan(&self, servers: &[&McpServer]) -> anyhow::Result<Vec<McpFilePlan>> {
+        let owned: Vec<McpServer> = servers.iter().map(|s| (*s).clone()).collect();
+        crate::mcp::inject::gemini::GeminiMcpInjector.plan(&owned)
     }
 
     fn credential_entries(&self) -> Vec<crate::agents::RawEntry> {

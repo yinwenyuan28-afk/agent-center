@@ -6,9 +6,9 @@
    * 一旦目录内被改动，下次 update 就会冲突。
    */
   import { onMount } from 'svelte';
-  import { Search, Plus, X } from '@lucide/svelte';
-  import { collectSkills, listSkills, scanOrphans, setSkillTags } from '../lib/ipc';
-  import type { CollectPlan, OrphanSkill, Skill } from '../lib/types';
+  import { Search, Plus, X, RefreshCw, FolderInput } from '@lucide/svelte';
+  import { applyOrphanAction, collectSkills, listSkills, scanOrphans, setSkillTags } from '../lib/ipc';
+  import type { OrphanAction, OrphanActionResult, OrphanSkill, Skill } from '../lib/types';
   import PageHead from '../lib/components/PageHead.svelte';
   import Button from '../lib/components/Button.svelte';
   import Badge from '../lib/components/Badge.svelte';
@@ -17,7 +17,6 @@
 
   let skills = $state<Skill[]>([]);
   let orphans = $state<OrphanSkill[]>([]);
-  let plan = $state<CollectPlan | null>(null);
   let loading = $state(true);
   let filter = $state('');
   /** 标签筛选。'__untagged__' 是特殊值，表示只看没有标签的。 */
@@ -27,6 +26,16 @@
   let log = $state('');
   let editing = $state<string | null>(null);
   let draftTag = $state('');
+
+  // ---- 散落 skill 处置对话框 ----
+  /** 对话框是否打开。打开时列表来自最近一次扫描。 */
+  let showOrphans = $state(false);
+  /** 正在处理的那条（按完整路径区分，同一个 skill 名可能在多处出现）。 */
+  let orphanBusy = $state<string | null>(null);
+  /** 本次对话框里已经执行过的处置，逐条显示。 */
+  let orphanResults = $state<OrphanActionResult[]>([]);
+  /** 一键处理（按关系套固定策略）是否在执行。 */
+  let collecting = $state(false);
 
   /** 未分类的哨兵值。用不可能出现在真实标签里的字符串，避免与用户标签撞名。 */
   const UNTAGGED = '__untagged__';
@@ -112,13 +121,202 @@
 
   async function runCollect(apply: boolean) {
     try {
-      plan = await collectSkills(apply);
+      await collectSkills(apply);
       if (apply) {
         log = '收集完成';
         await load();
+        // 处理完就重扫，对话框里的清单立刻反映现状
+        if (showOrphans) await rescanOrphans();
       }
     } catch (e) {
       log = `收集失败：${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  /**
+   * 一键收集：按关系套固定策略批量处理。
+   *
+   * 只处理「中心库没有」和「内容相同」两类 —— 冲突和坏链接必须人看着决定，
+   * 工具替用户选哪一份风险太大。所以这里先确认再执行。
+   */
+  async function collectAll() {
+    const importable = orphans.filter((o) => o.relation === 'unique').length;
+    const dedupable = orphans.filter((o) => o.relation === 'identical').length;
+    const skipped = orphans.length - importable - dedupable;
+
+    const ok = confirm(
+      `按关系批量处理散落 skill？\n\n` +
+        `· 移入中心库：${importable} 个（中心库没有的自建 skill）\n` +
+        `· 删副本改链接：${dedupable} 个（内容与中心库相同）\n` +
+        (skipped > 0 ? `· 不动：${skipped} 个（冲突或坏链接，需要你逐条决定）\n` : '') +
+        `\n要逐条决定请点「扫描散落 skill」。`,
+    );
+    if (!ok) return;
+
+    collecting = true;
+    try {
+      await runCollect(true);
+      if (showOrphans) await rescanOrphans();
+    } finally {
+      collecting = false;
+    }
+  }
+
+  /** 重新扫描散落 skill，用于对话框打开状态下刷新清单。 */
+  async function rescanOrphans() {
+    orphanBusy = 'rescan';
+    try {
+      orphans = await scanOrphans();
+      orphanResults = [];
+    } catch (e) {
+      log = `扫描失败：${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      orphanBusy = null;
+    }
+  }
+
+  /** 打开散落清单对话框，先重新扫一遍，避免显示上次的旧结果。 */
+  async function openOrphansDialog() {
+    showOrphans = true;
+    orphanResults = [];
+    await rescanOrphans();
+  }
+
+  /** 对一条散落 skill 执行用户选定的处置。 */
+  async function handleOrphan(o: OrphanSkill, action: OrphanAction) {
+    // 每个选项都会动磁盘，先确认。文案里写清后果，避免用户误点
+    if (!confirm(confirmText(o, action))) return;
+
+    orphanBusy = o.path;
+    try {
+      const r = await applyOrphanAction(o.path, action);
+      orphanResults = [...orphanResults, r];
+      if (r.ok) {
+        // 成功后立刻从清单里移除，不用整表重扫
+        orphans = orphans.filter((x) => x.path !== o.path);
+        // 移入中心库会让中心库多一条，主列表要跟着变
+        skills = await listSkills();
+      }
+    } catch (e) {
+      orphanResults = [
+        ...orphanResults,
+        {
+          name: o.name,
+          path: o.path,
+          action,
+          ok: false,
+          message: e instanceof Error ? e.message : String(e),
+        },
+      ];
+    } finally {
+      orphanBusy = null;
+    }
+  }
+
+  /** 关系 → 展示用的徽标文案与颜色。 */
+  function relationBadge(rel: OrphanSkill['relation']): {
+    text: string;
+    tone: 'ok' | 'warn' | 'danger' | 'info' | 'plain';
+  } {
+    switch (rel) {
+      case 'unique':
+        return { text: '中心库没有', tone: 'info' };
+      case 'identical':
+        return { text: '内容相同', tone: 'ok' };
+      case 'conflict':
+        return { text: '同名不同内容', tone: 'warn' };
+      default:
+        return { text: '坏链接', tone: 'danger' };
+    }
+  }
+
+  /** 每种关系可用的处置按钮。delete 在所有关系里都可用。 */
+  function actionsFor(rel: OrphanSkill['relation']): {
+    action: OrphanAction;
+    label: string;
+    hint: string;
+    variant: 'primary' | 'outline' | 'ghost' | 'danger';
+  }[] {
+    switch (rel) {
+      case 'unique':
+        return [
+          {
+            action: 'import',
+            label: '移入中心库',
+            hint: '搬进 ~/.agents/skills，原位置建链接，这个 agent 仍能读到',
+            variant: 'primary',
+          },
+          {
+            action: 'delete',
+            label: '删除',
+            hint: '直接删掉这份散落副本，不建链接',
+            variant: 'danger',
+          },
+        ];
+      case 'identical':
+        return [
+          {
+            action: 'dedupe',
+            label: '删副本改链接',
+            hint: '中心库那份内容相同，删掉这份，原位置建链接指向中心库',
+            variant: 'primary',
+          },
+          {
+            action: 'delete',
+            label: '删除',
+            hint: '删掉这份，不留链接',
+            variant: 'danger',
+          },
+        ];
+      case 'conflict':
+        return [
+          {
+            action: 'take-orphan',
+            label: '采用散落版',
+            hint: '用这一份覆盖中心库（旧版会先备份），原位置建链接',
+            variant: 'primary',
+          },
+          {
+            action: 'take-shared',
+            label: '采用中心库版',
+            hint: '保留中心库那份，删掉这份，原位置建链接',
+            variant: 'outline',
+          },
+          {
+            action: 'delete',
+            label: '删除',
+            hint: '两份都留着，只删这一份散落副本',
+            variant: 'danger',
+          },
+        ];
+      default:
+        return [
+          {
+            action: 'remove-link',
+            label: '删除坏链接',
+            hint: '只删这个失效的链接文件，不碰任何真实内容',
+            variant: 'primary',
+          },
+        ];
+    }
+  }
+
+  /** 处置前的确认文案。会动磁盘的操作都要说清后果。 */
+  function confirmText(o: OrphanSkill, action: OrphanAction): string {
+    const where = `${o.location} 下的 ${o.name}`;
+    switch (action) {
+      case 'import':
+        return `把 ${where} 移入中心库？\n\n原位置会建一个指向中心库的链接，${o.location.split('/')[1] ?? '该 agent'} 仍然能读到这个 skill。`;
+      case 'dedupe':
+        return `删掉 ${where} 这份副本，改建成指向中心库的链接？\n\n内容与中心库完全相同，不会丢东西。`;
+      case 'take-orphan':
+        return `用 ${where} 覆盖中心库的同名 skill？\n\n中心库那一份会先备份到 ~/.agents/backup/，原位置建链接。`;
+      case 'take-shared':
+        return `保留中心库那份，删掉 ${where} 并改建链接？\n\n这一份的本地改动会丢失。`;
+      case 'delete':
+        return `确定删除 ${where}？\n\n这是真删除，不进备份目录。`;
+      default:
+        return `删除 ${where} 这个坏链接？\n\n只删链接文件本身，不碰任何真实内容。`;
     }
   }
 
@@ -147,11 +345,20 @@
   </div>
   <span class="flex-1"></span>
   {#if orphans.length > 0}
-    <span class="text-xs text-[var(--color-text-muted)]">{orphans.length} 个散落副本</span>
+    <button
+      class="text-xs text-[var(--color-warn)] underline-offset-2 hover:underline"
+      onclick={openOrphansDialog}
+      disabled={loading}
+    >
+      {orphans.length} 个散落副本，点此处置
+    </button>
   {/if}
-  <Button onclick={() => runCollect(false)} disabled={loading}>扫描</Button>
-  <Button variant="primary" onclick={() => runCollect(true)} disabled={loading}>
-    收集到中心库
+  <Button onclick={openOrphansDialog} disabled={loading}>
+    <FolderInput size={14} />
+    扫描散落 skill
+  </Button>
+  <Button variant="primary" onclick={collectAll} disabled={loading || collecting}>
+    {collecting ? '处理中…' : '一键收集到中心库'}
   </Button>
 </div>
 
@@ -323,56 +530,144 @@
   {/if}
 {/if}
 
-{#if plan}
-  <div class="mt-6 rounded-[var(--radius-lg)] border border-[var(--color-border)] p-4">
-    <h2 class="mb-1 text-[14px] font-semibold">收集计划</h2>
-    <p class="mb-3 text-[12px] text-[var(--color-text-muted)]">
-      移入 = 收进中心库并在原位置建链接；去重 = 内容相同只删副本；冲突 = 内容不同，需要你决定。
-    </p>
-    <table class="w-full border-collapse text-[13px]">
-      <thead>
-        <tr
-          class="border-b border-[var(--color-border)] text-left text-[11px] uppercase tracking-wider text-[var(--color-text-faint)]"
+{#if showOrphans}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+    role="dialog"
+    tabindex="-1"
+    aria-modal="true"
+    aria-labelledby="orphans-title"
+    onclick={(e) => {
+      if (e.target === e.currentTarget && !orphanBusy) showOrphans = false;
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape' && !orphanBusy) showOrphans = false;
+    }}
+  >
+    <div
+      class="flex max-h-[min(880px,calc(100vh-2rem))] w-full max-w-4xl flex-col overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border-strong)] bg-[var(--color-bg)] shadow-lg"
+    >
+      <div class="border-b border-[var(--color-border)] px-5 py-4">
+        <div class="flex items-start gap-3">
+          <div class="min-w-0 flex-1">
+            <h2 id="orphans-title" class="text-[15px] font-semibold text-[var(--color-text)]">
+              散落 skill 处置
+            </h2>
+            <p class="mt-1 text-[12px] text-[var(--color-text-muted)]">
+              下面这些 skill 躺在各个 agent 自己的目录里，没有收进中心库
+              <code class="font-[var(--font-mono)]">~/.agents/skills</code>。
+              逐条选怎么处理；每个动作都会先问一次再动磁盘。
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            onclick={rescanOrphans}
+            disabled={orphanBusy !== null}
+          >
+            <RefreshCw size={13} />
+            {orphanBusy === 'rescan' ? '扫描中…' : '重新扫描'}
+          </Button>
+        </div>
+      </div>
+
+      <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        {#if orphanBusy === 'rescan'}
+          <div class="flex flex-col gap-2">
+            {#each Array(4) as _}
+              <div class="h-14 animate-pulse rounded-[var(--radius-sm)] bg-[var(--color-bg-muted)]"></div>
+            {/each}
+          </div>
+        {:else if orphans.length === 0}
+          <div class="py-12 text-center text-[13px] text-[var(--color-text-faint)]">
+            没有散落的 skill。<br />
+            <span class="text-[12px]">
+              各 agent 的 skills 目录里只有链接或空目录时，这里就是空的。
+            </span>
+          </div>
+        {:else}
+          <div class="flex flex-col gap-2">
+            {#each orphans as o (o.path)}
+              {@const rel = relationBadge(o.relation)}
+              <div class="rounded-[var(--radius-md)] border border-[var(--color-border)] p-3">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="font-[var(--font-mono)] text-[13px] text-[var(--color-text)]">
+                    {o.name}
+                  </span>
+                  <Badge tone={rel.tone}>{rel.text}</Badge>
+                  {#if o.fileCount > 0}
+                    <span class="text-[11px] text-[var(--color-text-faint)]">
+                      {o.fileCount} 个文件 · {kb(o.sizeBytes)}
+                    </span>
+                  {/if}
+                  <span class="flex-1"></span>
+                  <span
+                    class="font-[var(--font-mono)] text-[11px] text-[var(--color-text-faint)]"
+                    title={o.path}
+                  >
+                    {o.location}
+                  </span>
+                </div>
+
+                {#if o.description}
+                  <div class="mt-1.5 line-clamp-2 break-words text-[12px] leading-snug text-[var(--color-text-muted)]" title={o.description}>
+                    {o.description}
+                  </div>
+                {/if}
+
+                <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                  {#each actionsFor(o.relation) as a (a.action)}
+                    <Button
+                      size="sm"
+                      variant={a.variant}
+                      title={a.hint}
+                      disabled={orphanBusy !== null}
+                      onclick={() => handleOrphan(o, a.action)}
+                    >
+                      {orphanBusy === o.path ? '处理中…' : a.label}
+                    </Button>
+                  {/each}
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        {#if orphanResults.length > 0}
+          <div class="mt-4 rounded-[var(--radius-md)] border border-[var(--color-border)] p-3">
+            <h3 class="mb-2 text-[12px] font-medium text-[var(--color-text)]">本次处置记录</h3>
+            <div class="flex flex-col gap-1">
+              {#each orphanResults as r, i (i)}
+                <div class="flex items-start gap-2 text-[12px] leading-snug">
+                  <Badge tone={r.ok ? 'ok' : 'danger'}>{r.ok ? '成功' : '失败'}</Badge>
+                  <span class="font-[var(--font-mono)] text-[11px]">{r.name}</span>
+                  <span class="min-w-0 flex-1 break-words text-[var(--color-text-muted)]">
+                    {r.message}
+                  </span>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </div>
+
+      <div class="flex items-center gap-2 border-t border-[var(--color-border)] px-5 py-3">
+        <span class="text-[11px] text-[var(--color-text-faint)]">
+          「一键收集」只处理中心库没有的和内容相同的；冲突要在这里逐条选。
+        </span>
+        <span class="flex-1"></span>
+        <Button variant="ghost" onclick={() => (showOrphans = false)} disabled={orphanBusy !== null}>
+          关闭
+        </Button>
+        <Button
+          variant="primary"
+          onclick={collectAll}
+          disabled={orphanBusy !== null || collecting || orphans.length === 0}
         >
-          <th class="px-4 py-2 font-medium">处理</th>
-          <th class="px-4 py-2 font-medium">名称</th>
-          <th class="px-4 py-2 font-medium">当前位置</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each plan.toImport as o (o.path)}
-          <tr class="border-b border-[var(--color-border)] last:border-0">
-            <td class="px-4 py-2"><Badge tone="ok">移入</Badge></td>
-            <td class="px-4 py-2 font-[var(--font-mono)] text-[12px]">{o.name}</td>
-            <td class="px-4 py-2 font-[var(--font-mono)] text-[11px] text-[var(--color-text-muted)]">{o.location}</td>
-          </tr>
-        {/each}
-        {#each plan.toDedupe as o (o.path)}
-          <tr class="border-b border-[var(--color-border)] last:border-0">
-            <td class="px-4 py-2"><Badge tone="info">去重</Badge></td>
-            <td class="px-4 py-2 font-[var(--font-mono)] text-[12px]">{o.name}</td>
-            <td class="px-4 py-2 font-[var(--font-mono)] text-[11px] text-[var(--color-text-muted)]">{o.location}</td>
-          </tr>
-        {/each}
-        {#each plan.conflicts as o (o.path)}
-          <tr class="border-b border-[var(--color-border)] last:border-0">
-            <td class="px-4 py-2"><Badge tone="warn">冲突</Badge></td>
-            <td class="px-4 py-2 font-[var(--font-mono)] text-[12px]">{o.name}</td>
-            <td class="px-4 py-2 font-[var(--font-mono)] text-[11px] text-[var(--color-text-muted)]">{o.location}</td>
-          </tr>
-        {/each}
-        {#each plan.broken as o (o.path)}
-          <tr class="border-b border-[var(--color-border)] last:border-0">
-            <td class="px-4 py-2"><Badge tone="danger">坏链接</Badge></td>
-            <td class="px-4 py-2 font-[var(--font-mono)] text-[12px]">{o.name}</td>
-            <td class="px-4 py-2 font-[var(--font-mono)] text-[11px] text-[var(--color-text-muted)]">{o.location}</td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-    {#if plan.toImport.length === 0 && plan.toDedupe.length === 0 && plan.conflicts.length === 0 && plan.broken.length === 0}
-      <div class="py-8 text-center text-[13px] text-[var(--color-text-faint)]">没有需要收集的 skill。</div>
-    {/if}
+          {collecting ? '处理中…' : '一键收集可自动处理的'}
+        </Button>
+      </div>
+    </div>
   </div>
 {/if}
 

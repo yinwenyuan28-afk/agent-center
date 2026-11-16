@@ -85,6 +85,27 @@ fn backup_root() -> PathBuf {
 /// 用时间戳分子目录，避免同一秒内多次备份互相覆盖；
 /// 如果时间戳目录已存在就加序号后缀。
 fn move_to_backup(path: &Path) -> anyhow::Result<PathBuf> {
+    let dest = new_backup_slot(path)?;
+    fs::rename(path, &dest)?;
+    Ok(dest)
+}
+
+/// 把一个目录复制进备份目录，返回备份后的位置。**原目录保留**。
+///
+/// 和 [`move_to_backup`] 的区别是跨卷安全：目录被 rename 到另一个卷
+/// 会直接失败，而用户放进备份的目录常常和 `~/.agents` 不在一个盘上。
+/// 复制成功后由调用方决定删不删原目录。
+pub fn backup_dir_copy(path: &Path) -> anyhow::Result<PathBuf> {
+    let dest = new_backup_slot(path)?;
+    copy_dir_recursive(path, &dest)?;
+    Ok(dest)
+}
+
+/// 在备份目录里给一个路径腾出位置，返回备份目标路径。
+///
+/// 只建目录、算路径，不搬东西 —— 文件和目录的搬运方式不同
+/// （目录跨卷 rename 会失败），所以留给调用方决定怎么搬。
+fn new_backup_slot(path: &Path) -> anyhow::Result<PathBuf> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let mut dir = backup_root().join(&stamp);
     let mut n = 1;
@@ -98,9 +119,7 @@ fn move_to_backup(path: &Path) -> anyhow::Result<PathBuf> {
         .file_name()
         .map(|n| n.to_os_string())
         .unwrap_or_else(|| "unknown".into());
-    let dest = dir.join(file_name);
-    fs::rename(path, &dest)?;
-    Ok(dest)
+    Ok(dir.join(file_name))
 }
 
 /// 判断一个路径是不是链接（符号链接或 junction）。
@@ -138,12 +157,29 @@ pub fn inspect(m: &ResolvedMapping) -> Mapping {
         actual: None,
         health: HealthState::Missing,
         installed,
+        disabled: m.disabled,
         note: None,
     };
 
     if !source_exists {
         mapping.note = Some("母版文件不存在".to_string());
         mapping.health = HealthState::Broken;
+        return mapping;
+    }
+
+    if m.disabled {
+        // 已取消的映射：不再诊断链接健康度，只报告目标是否已清掉。
+        // 用户主动关掉的东西不该在界面上一直报红。
+        mapping.actual = if is_link(&m.target) {
+            Some(detect_link_kind(&m.target))
+        } else {
+            None
+        };
+        mapping.note = Some(if m.target.exists() || is_link(&m.target) {
+            "已取消映射，但目标位置的链接还在，可点「取消映射」清掉".to_string()
+        } else {
+            "已取消，同步时跳过".to_string()
+        });
         return mapping;
     }
 
@@ -397,7 +433,11 @@ fn apply(kind: LinkKind, target: &Path, source: &Path, is_dir: bool) -> anyhow::
                 // 理由：junction 的创建就是一条稳定的系统命令，
                 // 引一个只为这一件事的依赖不值得，而且路径含空格时
                 // 由 std 的参数转义处理比手拼命令行更安全。
-                let status = std::process::Command::new("cmd")
+                //
+                // 走 crate::proc 而不是裸 Command：主程序没有控制台，
+                // 直接起 cmd 会让系统给这个子进程新建一个黑窗口。
+                let mut cmd = crate::proc::new("cmd");
+                let status = cmd
                     .arg("/C")
                     .arg("mklink")
                     .arg("/J")
@@ -507,4 +547,74 @@ pub fn sync_one(m: &ResolvedMapping) -> anyhow::Result<(LinkKind, String)> {
 
     let (kind, note) = create_link(&m.target, &m.source, m.mode)?;
     Ok((kind, format!("{note}{backup_note}")))
+}
+
+/// 取消一个映射：删掉目标位置上的链接或副本。
+///
+/// 边界与 [`sync_one`] 对称 —— 只动「映射建出来的东西」，母版一律不碰：
+///
+/// - 符号链接 / junction：只删链接本身，指向的内容原地不动
+/// - 与母版同一 inode 的硬链接：删掉这个目录项，母版那一份仍在
+/// - 内容与母版一致的副本：删掉，母版有同一份
+/// - 内容与母版不一致的真实文件：**不直接删**，移进备份目录后报告位置
+/// - 目标本来就不存在：算成功，保证重复点两次不报错
+///
+/// 只删文件不动配置。`disabled` 标记由 commands 层写进配置文件，
+/// 否则下一次同步会立刻把它建回来。
+pub fn remove_one(m: &ResolvedMapping) -> anyhow::Result<String> {
+    // 目标不存在，也没有悬空的链接 → 已经是取消状态
+    if !m.target.exists() && !is_link(&m.target) {
+        return Ok("目标本来就不存在，无需处理".to_string());
+    }
+
+    // 符号链接 / junction：只删链接，不碰目标内容
+    if is_link(&m.target) {
+        let dest = read_link_target(&m.target);
+        fs::remove_file(&m.target).or_else(|_| fs::remove_dir(&m.target))?;
+        return Ok(match dest {
+            Some(d) => format!("已删除链接，指向的内容保留在 {}", d.display()),
+            None => "已删除链接".to_string(),
+        });
+    }
+
+    // 与母版同一 inode 的硬链接：删目录项即可，母版那一份不受影响
+    if is_same_inode(&m.target, &m.source) {
+        fs::remove_file(&m.target)?;
+        return Ok("已删除硬链接，母版文件不受影响".to_string());
+    }
+
+    // 剩下的都是真实文件或目录。内容与母版一致才敢直接删。
+    let same = if m.target.is_dir() {
+        match (sha256_dir(&m.target), sha256_dir(&m.source)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    } else {
+        match (sha256_file(&m.target), sha256_file(&m.source)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    };
+
+    if same {
+        if m.target.is_dir() {
+            fs::remove_dir_all(&m.target)?;
+        } else {
+            fs::remove_file(&m.target)?;
+        }
+        return Ok("副本内容与母版一致，已删除".to_string());
+    }
+
+    // 内容不同或被用户改过：不删，移进备份目录
+    if m.target.is_dir() {
+        let dest = backup_dir_copy(&m.target)?;
+        fs::remove_dir_all(&m.target)?;
+        return Ok(format!(
+            "目标内容与母版不同，已移到备份 {}",
+            dest.display()
+        ));
+    }
+
+    let dest = move_to_backup(&m.target)?;
+    Ok(format!("目标内容与母版不同，已移到备份 {}", dest.display()))
 }

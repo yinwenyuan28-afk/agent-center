@@ -17,6 +17,8 @@
     disabled?: boolean;
     type?: 'button' | 'submit';
     class?: string;
+    /** 悬停提示。用来说明点下去会发生什么，尤其是会动磁盘的操作 */
+    title?: string;
     onclick?: (e: MouseEvent) => void;
     children: Snippet;
   }
@@ -27,6 +29,7 @@
     disabled = false,
     type = 'button',
     class: className = '',
+    title,
     onclick,
     children,
   }: Props = $props();
@@ -50,6 +53,7 @@
 <button
   {type}
   {disabled}
+  {title}
   onclick={onclick}
   class={cn(
     'inline-flex items-center justify-center gap-1.5 whitespace-nowrap',

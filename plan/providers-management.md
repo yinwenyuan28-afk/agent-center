@@ -623,6 +623,63 @@ providers assign alpha --agents claude,pi  # beta 的 claude 自动消失
 - 分配改动立即写母版，不存在「改完忘了保存」；真正生效要按「应用到各 agent」
 - 每次展开一个 provider，上一行自动收起，避免页面拉太长
 
+### 两个视角：provider 管理 / 启用 provider
+
+列表顶部有个二选一切换。**改的是同一份数据**（母版里每个 provider 的 `agents`），
+只是分组方向相反：
+
+| 视角 | 一行是什么 | 适合的问题 |
+| --- | --- | --- |
+| provider 管理 | 一个 provider，只做池子的增删改 | 「这个中转站配了什么」 |
+| 启用 provider | 一个 agent，勾选它启用哪几个 provider | 「这台机器上的 Pi 现在用哪家」 |
+
+两个视角的分工是刻意分开的：
+
+- **provider 管理**只管池子本身——新增、编辑、删一条，以及直接改 TOML。
+  这里没有「分配」按钮，也不显示某个 provider 注入到哪些 agent。
+- **启用 provider**只管分配关系——勾选写母版，工具栏上的「应用到各 agent」
+  才真正写进各家配置文件。这个按钮只在这个视角出现，因为它紧挨着勾选动作。
+
+启用 provider 视角的几条规则：
+
+- **卡片默认全部折叠**，只显示一行摘要（`当前生效：command` / `已启用 2 个：…`）。
+  点标题行展开，展开后 provider 一项一行，名字在前、协议靠右。
+  一台机器上不一定每个 agent 都用，全展开页面太长。
+- **单槽位 agent 变成单选**。勾第二个会自动把第一个摘掉，和后端
+  `matrix.rs` 的互斥逻辑一致，只是入口翻了过来。
+- **多槽位 agent 是普通多选**，勾上就是往 `agents` 里加。
+- **卡片上显示的协议是该 agent 下真正会用的那个**，不是 provider 的默认值。
+  比如 `command` 默认 `anthropic`，但在 Codex 下会显示 `openai-responses` ——
+  因为 Codex 只认 responses，注入时会改写。显示默认值等于骗人。
+- **单槽位的说明按 agent 分开写**。Claude 是因为只有一组 `ANTHROPIC_*` 环境变量，
+  Codex 是只认一张 `model_providers` 表，两者原因不同。
+- **特殊操作统一放在勾选列表下面的说明行**，不塞进标题行：
+  Claude 有「首次引导设置」和「配置档位映射」，Codex 有「后端开关」。
+  前两个改 `~/.claude.json` 和 `claude_model_map`，第三个改
+  `requires_openai_auth`，都在侧栏「Claude & Codex」页或映射弹窗里完成。
+
+### agent 顺序条
+
+启用视角顶部有一排 agent 名字，两个用途：
+
+- **拖动排序**。顺序存在浏览器 `localStorage` 的
+  `agentcenter.providers.agentOrder` 里，刷新后保留。不写母版——它纯粹是
+  显示偏好，写进配置会污染「配置」这个语义。
+- **点击跳转**。点了会滚到那张卡片**并自动展开**（跳过去不展开等于没跳）。
+
+两个附带的按钮：「按名称排序」把顺序改成字母序，「恢复默认」清掉
+`localStorage` 回到后端给的顺序（`agents::all()` 按 `order()` 排）。
+
+顺序表里没提到的 agent 追加在末尾，这样后端新增 agent 时不用手动补，
+也不会因为顺序表过期把它藏起来。
+  opus / sonnet / haiku / 默认 映射弹窗。
+
+**Cursor 在启用视角里单独一张卡**，和上面的 agent 卡片同形，里面嵌
+`src/lib/components/CursorByok.svelte`。它不在 provider 矩阵里
+（`supports_provider()` 为 false，只有一个开关加一个地址），所以手写在
+循环之后，不是从 `matrix.columns` 出来的。它不参与「应用到各 agent」，
+详情见 `provider-config-keys.md`。
+
 ### Claude 单槽位互斥
 
 Claude Code 只有一组 `ANTHROPIC_*` 环境变量，同一时刻只能一个 provider 生效。

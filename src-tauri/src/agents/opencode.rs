@@ -1,4 +1,4 @@
-//! opencode。
+﻿//! opencode。
 //!
 //! 三个能力：指令文件、provider、MCP。
 //!
@@ -7,7 +7,7 @@
 //! 具体注入逻辑在 [`crate::providers::opencode`]。
 
 use super::Agent;
-use crate::mcp::inject::McpFilePlan;
+use crate::mcp::inject::{McpFilePlan, McpInjector};
 use crate::mcp::model::McpServer;
 use crate::mcp::scan::{self as mcp_scan, McpAgentScan};
 use crate::providers::model::{FilePlan, Provider};
@@ -103,6 +103,6 @@ impl Agent for OpenCode {
 
     fn mcp_plan(&self, servers: &[&McpServer]) -> anyhow::Result<Vec<McpFilePlan>> {
         let owned: Vec<McpServer> = servers.iter().map(|s| (*s).clone()).collect();
-        crate::mcp::inject::plan_opencode(&owned)
+        crate::mcp::inject::opencode::OpencodeMcpInjector.plan(&owned)
     }
 }

@@ -207,3 +207,61 @@ fn model_spec_input_within_drops_unsupported_modalities() {
     let bare = ModelSpec::new("m");
     assert_eq!(bare.input_within(&["text", "image"]), vec!["text".to_string()]);
 }
+
+// ---------------------------------------------------------------- Codex 的模型与档位
+
+/// `codex_model` 优先，没填才回退到 models 的第一个。
+#[test]
+fn codex_model_prefers_explicit_pick() {
+    use crate::providers::model::{ModelSpec, Provider};
+
+    let mut p = Provider {
+        id: "p".into(),
+        name: "p".into(),
+        base_url: "https://example.com".into(),
+        kind: ProviderKind::OpenaiResponses,
+        agent_kinds: Default::default(),
+        api_key: "k".repeat(32),
+        models: vec![ModelSpec::new("first"), ModelSpec::new("second")],
+        agents: vec!["codex".into()],
+        claude_model_map: Default::default(),
+        codex_requires_openai_auth: None,
+        codex_model: None,
+        note: String::new(),
+    };
+
+    // 没指定 → 第一个
+    assert_eq!(p.codex_model_or_first(), Some("first"));
+
+    // 指定了 → 用指定的
+    p.codex_model = Some("second".into());
+    assert_eq!(p.codex_model_or_first(), Some("second"));
+
+    // 空白串当成没填，不许覆盖掉第一个
+    p.codex_model = Some("   ".into());
+    assert_eq!(p.codex_model_or_first(), Some("first"));
+
+    // 一个模型都没有 → None，注入器据此跳过写 model 键
+    p.models.clear();
+    p.codex_model = None;
+    assert_eq!(p.codex_model_or_first(), None);
+}
+
+/// Codex 只接受这七个档位。
+///
+/// 这些值会被原样放进请求体的 `reasoning.effort`，上游是封闭枚举。
+/// 实测传母版里的 `enabled` 直接 400：
+/// `Invalid option: expected one of "none"|"minimal"|...`。
+/// 所以注入器必须只写白名单里的值，并清掉文件里残留的不合法值。
+#[test]
+fn codex_effort_whitelist_matches_upstream_enum() {
+    use crate::providers::codex::is_codex_effort;
+
+    for ok in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+        assert!(is_codex_effort(ok), "{ok} 应该在白名单里");
+    }
+    // 各家自己的写法不在 Codex 词表里
+    for bad in ["enabled", "off", "disabled", "true", ""] {
+        assert!(!is_codex_effort(bad), "{bad} 不该被写进 config.toml");
+    }
+}

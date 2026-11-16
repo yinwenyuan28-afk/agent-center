@@ -1,4 +1,4 @@
-//! Grok Build CLI。
+﻿//! Grok Build CLI。
 //!
 //! ## provider：单槽位
 //!
@@ -8,6 +8,9 @@
 //! **本机未安装**，实现是按 cc-switch 的 `grok_config.rs` 移植的。
 
 use super::Agent;
+use crate::mcp::inject::{McpFilePlan, McpInjector};
+use crate::mcp::model::McpServer;
+use crate::mcp::scan::{self as mcp_scan, McpAgentScan};
 use crate::providers::model::{FilePlan, Provider};
 use crate::providers::scan::AgentScan;
 use crate::providers::store::home_dir;
@@ -71,5 +74,24 @@ impl Agent for Grok {
     fn provider_plan(&self, providers: &[Provider]) -> anyhow::Result<Vec<FilePlan>> {
         use crate::providers::Injector;
         crate::providers::grok::GrokInjector.plan(providers)
+    }
+
+    // ---- MCP ----
+
+    fn supports_mcp(&self) -> bool {
+        true
+    }
+
+    fn mcp_ready(&self) -> bool {
+        crate::mcp::inject::grok::config_path().exists()
+    }
+
+    fn mcp_scan(&self) -> Option<McpAgentScan> {
+        Some(mcp_scan::scan_grok())
+    }
+
+    fn mcp_plan(&self, servers: &[&McpServer]) -> anyhow::Result<Vec<McpFilePlan>> {
+        let owned: Vec<McpServer> = servers.iter().map(|s| (*s).clone()).collect();
+        crate::mcp::inject::grok::GrokMcpInjector.plan(&owned)
     }
 }

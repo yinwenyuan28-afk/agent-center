@@ -1,4 +1,4 @@
-//! WorkBuddy。
+﻿//! WorkBuddy。
 //!
 //! 三个能力：provider、MCP、skills（但没有单一指令文件 ——
 //! 它是 SOUL/IDENTITY/USER/MEMORY 一整套）。
@@ -7,7 +7,7 @@
 //! [`crate::mcp::inject::WorkBuddyMcpInjector`]。
 
 use super::Agent;
-use crate::mcp::inject::McpFilePlan;
+use crate::mcp::inject::{McpFilePlan, McpInjector};
 use crate::mcp::model::McpServer;
 use crate::mcp::scan::{self as mcp_scan, McpAgentScan};
 use crate::providers::model::{FilePlan, Provider};
@@ -88,7 +88,7 @@ impl Agent for WorkBuddy {
 
     fn mcp_plan(&self, servers: &[&McpServer]) -> anyhow::Result<Vec<McpFilePlan>> {
         let owned: Vec<McpServer> = servers.iter().map(|s| (*s).clone()).collect();
-        crate::mcp::inject::plan_workbuddy(&owned)
+        crate::mcp::inject::workbuddy::WorkBuddyMcpInjector.plan(&owned)
     }
 
     fn credential_unsupported(&self) -> Option<&'static str> {

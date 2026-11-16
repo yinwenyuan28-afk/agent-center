@@ -11,9 +11,11 @@
     createDoc as createDocApi,
     listMappings,
     readDoc,
+    remap,
     repairMapping,
     saveDoc as saveDocApi,
     syncMappings,
+    unmap,
   } from '../lib/ipc';
   import type { Mapping } from '../lib/types';
   import PageHead from '../lib/components/PageHead.svelte';
@@ -40,6 +42,8 @@
 
   /** 把健康状态翻成界面用词，只在需要行动时用强色。 */
   function healthLabel(m: Mapping): { text: string; tone: 'ok' | 'warn' | 'danger' | 'plain' } {
+    // 已取消优先：用户主动关掉的东西不该显示成「坏了」
+    if (m.disabled) return { text: '已取消', tone: 'plain' };
     if (!m.installed) return { text: '未安装', tone: 'plain' };
     switch (m.health) {
       case 'ok':
@@ -101,6 +105,42 @@
       await load();
     } catch (e) {
       log = `失败：${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      busy = null;
+    }
+  }
+
+  /** 取消映射：删掉目标位置的链接，并记下不再同步。 */
+  async function cancelMapping(m: Mapping) {
+    const ok = confirm(
+      `取消 ${m.label} 的映射？\n\n` +
+        `会删掉 ${m.target} 处的链接。\n` +
+        `母版文件不受影响；如果那个文件内容与母版不同，会先移进 ~/.agents/backup/。\n\n` +
+        `取消后「同步全部」会跳过它，随时可以点「恢复映射」重建。`,
+    );
+    if (!ok) return;
+
+    busy = m.agent;
+    try {
+      const r = await unmap(m.agent);
+      log = r.output;
+      await load();
+    } catch (e) {
+      log = `取消失败：${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      busy = null;
+    }
+  }
+
+  /** 恢复映射：清掉「已取消」标记并立刻重建链接。 */
+  async function restoreMapping(m: Mapping) {
+    busy = m.agent;
+    try {
+      const r = await remap(m.agent);
+      log = r.output;
+      await load();
+    } catch (e) {
+      log = `恢复失败：${e instanceof Error ? e.message : String(e)}`;
     } finally {
       busy = null;
     }
@@ -314,11 +354,30 @@
               {/if}
             </td>
             <td class="px-4 py-2.5 text-right">
-              {#if m.installed && m.health !== 'ok'}
-                <Button size="sm" onclick={() => repair(m.agent)} disabled={busy !== null}>
-                  {busy === m.agent ? '修复中…' : '修复'}
-                </Button>
-              {/if}
+              <div class="flex items-center justify-end gap-1.5">
+                {#if m.disabled}
+                  <Button size="sm" onclick={() => restoreMapping(m)} disabled={busy !== null}>
+                    {busy === m.agent ? '恢复中…' : '恢复映射'}
+                  </Button>
+                {:else}
+                  {#if m.installed && m.health !== 'ok'}
+                    <Button size="sm" onclick={() => repair(m.agent)} disabled={busy !== null}>
+                      {busy === m.agent ? '修复中…' : '修复'}
+                    </Button>
+                  {/if}
+                  {#if m.installed}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onclick={() => cancelMapping(m)}
+                      disabled={busy !== null}
+                      title="删除这个 agent 目录里的链接，并让后续同步跳过它"
+                    >
+                      取消映射
+                    </Button>
+                  {/if}
+                {/if}
+              </div>
             </td>
           </tr>
         {/each}
