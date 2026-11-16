@@ -15,10 +15,10 @@ use crate::types::{GitChange, GitStatus, RunResult};
 use std::path::{Path, PathBuf};
 
 /// 被管理的仓库：`~/.agents`。
+///
+/// 走 `store::home_dir()` 以跟随 `AGENTCENTER_HOME`。
 pub fn repo_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".agents")
+    crate::providers::store::home_dir().join(".agents")
 }
 
 /// 在仓库目录里执行一条 git 命令。

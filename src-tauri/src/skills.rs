@@ -18,17 +18,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// 中心库位置：`~/.agents/skills`。
+///
+/// 走 `store::home_dir()` 以跟随 `AGENTCENTER_HOME`。
 pub fn shared_skills_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::providers::store::home_dir()
         .join(".agents")
         .join("skills")
 }
 
 /// `npx skills` 的 lock 文件位置：`~/.agents/.skill-lock.json`。
 pub fn skill_lock_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::providers::store::home_dir()
         .join(".agents")
         .join(".skill-lock.json")
 }

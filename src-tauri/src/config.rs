@@ -118,35 +118,38 @@ pub struct Config {
 ///
 /// 只处理开头的 `~`，不处理 `~user` 形式 —— 跨平台的后者语义不一致，
 /// 与其猜错不如不做。
+///
+/// **用 `store::home_dir()` 而不是 `dirs::home_dir()`**：前者认
+/// `AGENTCENTER_HOME` 环境变量。两边用不同的家目录会让测试隔离失效 ——
+/// 用户以为在临时目录里操作，实际改的是真实配置。这个坑修过一次：
+/// 映射目标里的 `~/.pi/agent/AGENTS.md` 曾经不跟随 AGENTCENTER_HOME。
 pub fn expand_tilde(input: &str) -> PathBuf {
+    let home = crate::providers::store::home_dir();
     if let Some(rest) = input.strip_prefix("~/").or_else(|| input.strip_prefix("~\\")) {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
+        return home.join(rest);
     }
     if input == "~" {
-        if let Some(home) = dirs::home_dir() {
-            return home;
-        }
+        return home;
     }
     PathBuf::from(input)
 }
 
 /// 把绝对路径压回 `~` 形式，用于界面展示和写回配置。
 pub fn contract_tilde(path: &Path) -> String {
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(rest) = path.strip_prefix(&home) {
-            let s = rest.to_string_lossy().replace('\\', "/");
-            return format!("~/{s}");
-        }
+    let home = crate::providers::store::home_dir();
+    if let Ok(rest) = path.strip_prefix(&home) {
+        let s = rest.to_string_lossy().replace('\\', "/");
+        return format!("~/{s}");
     }
-    path.to_string_lossy().to_string()
+    path.to_string_lossy().replace('\\', "/")
 }
 
 /// 配置文件的位置：`~/.agents/agentcenter.toml`。
+///
+/// 和 [`expand_tilde`] 一样走 `store::home_dir()`，保证
+/// `AGENTCENTER_HOME` 能整体隔离配置读取。
 pub fn config_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::providers::store::home_dir()
         .join(".agents")
         .join("agentcenter.toml")
 }

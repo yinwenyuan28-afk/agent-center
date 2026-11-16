@@ -22,12 +22,13 @@ pub struct DocContent {
 }
 
 /// 母版文件的实际路径，从配置里取（默认 `~/.agents/AGENTS.md`）。
+///
+/// 回退路径走 `store::home_dir()`，跟随 `AGENTCENTER_HOME`。
 pub fn doc_path() -> std::path::PathBuf {
     Config::load()
         .map(|c| c.source_path())
         .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
+            crate::providers::store::home_dir()
                 .join(".agents")
                 .join("AGENTS.md")
         })

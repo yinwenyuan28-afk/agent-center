@@ -73,9 +73,11 @@ pub fn sha256_dir(path: &Path) -> anyhow::Result<String> {
 }
 
 /// 备份目录：`~/.agents/backup/<时间戳>/`。
+///
+/// 走 `store::home_dir()` 而不是 `dirs::home_dir()`，让 `AGENTCENTER_HOME`
+/// 能整体重定向 —— 否则隔离测试时备份还是会写进真实家目录。
 fn backup_root() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::providers::store::home_dir()
         .join(".agents")
         .join("backup")
 }
