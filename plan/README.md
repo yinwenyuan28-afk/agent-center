@@ -11,6 +11,7 @@
 | [provider-config-keys.md](provider-config-keys.md) | 各工具改哪个文件、哪些键；CC Switch 已核对，我们的实现标待确认 | 记录 |
 | [provider-models-and-agent-interface.md](provider-models-and-agent-interface.md) | 模型元数据管理 + Agent 接口化重构 | 已实施 |
 | [token-usage-stats.md](token-usage-stats.md) | token 用量统计：四家 session 位置、口径归一、按需读取 | 已实施 |
+| [agent-config-management-reference.md](agent-config-management-reference.md) | 各 agent 的 AGENTS.md / provider / MCP 分别改哪个文件、怎么改；CLI 全量清单、agent 化缺口与建议补的能力 | 参考 |
 
 ## 要解决的问题
 

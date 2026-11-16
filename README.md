@@ -112,6 +112,11 @@ agentcenter sync                     # 同步全部 AGENTS 映射
 agentcenter sync --dry-run           # 只看要做什么
 agentcenter status                   # 查看各映射健康状态
 agentcenter mappings                 # 列出映射表
+
+agentcenter doc path                 # 母版 AGENTS.md 在哪、在不在
+agentcenter doc read                 # 输出母版内容
+agentcenter doc write --file x.md    # 覆盖写入（空内容会被拒）
+agentcenter doc create --file x.md   # 只在不存在时创建
 agentcenter unmap claude             # 取消某个映射：删链接，并让后续 sync 跳过它
 agentcenter remap claude             # 恢复被取消的映射：立刻重建链接
 
@@ -119,12 +124,15 @@ agentcenter skills list              # 列出中心库的 skill
 agentcenter skills scan              # 扫描散落副本
 agentcenter skills collect           # 预览收集计划
 agentcenter skills collect --apply
+agentcenter skills apply --dry-run                  # 看每条散落 skill 可用哪些动作
+agentcenter skills apply --path <路径> --action dedupe   # 逐条处置
 agentcenter skills tag ui-design --add UI设计
 agentcenter skills check             # 检查第三方更新
 agentcenter skills update            # 更新全部
 
 agentcenter creds inspect            # API key 体检（只读）
 
+agentcenter --json providers list    # 结构化输出，给脚本和 agent 用
 agentcenter providers list           # 列出母版里的 provider
 agentcenter providers matrix         # 显示分配矩阵：每个 provider 用在哪些 agent
 agentcenter providers assign <id> --agents claude,pi   # 整行设置分配（省略 --agents 清空）
@@ -143,6 +151,18 @@ agentcenter providers cursor plan command    # 看要让 command 生效还差什
 agentcenter providers cursor apply command --models a,b   # 写入并加模型
 agentcenter providers cursor remove-model a,b             # 从模型选择器删模型
 agentcenter providers cursor reset           # 关掉自带密钥，回到官方模型
+
+agentcenter mcp list                 # 列出母版里的 MCP server
+agentcenter mcp add <id> --command npx --args "-y,pkg" --agents claude,codex
+agentcenter mcp remove <id>
+agentcenter mcp assign <id> --agents claude,pi
+agentcenter mcp matrix               # 每条 server 分配给哪些 agent
+agentcenter mcp import               # 从各 agent 现有配置导入
+agentcenter mcp diff / sync [--dry-run]
+
+agentcenter bridge status            # Claude 协议转换端口（127.0.0.1:15722）状态
+agentcenter bridge start             # 后台拉起
+agentcenter bridge stop
 
 agentcenter claude status            # Claude Code 是否会显示首次引导
 agentcenter claude skip              # 跳过首次引导（写 ~/.claude.json 的 hasCompletedOnboarding）
