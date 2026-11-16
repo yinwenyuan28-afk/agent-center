@@ -129,6 +129,30 @@ pub enum OrphanRelation {
     BrokenLink,
 }
 
+impl OrphanRelation {
+    /// 从命令行字符串解析。接受 kebab-case 和常见的下划线/驼峰写法。
+    pub fn parse(s: &str) -> Option<Self> {
+        let norm = s.trim().to_lowercase().replace('_', "-");
+        match norm.as_str() {
+            "unique" => Some(Self::Unique),
+            "identical" => Some(Self::Identical),
+            "conflict" => Some(Self::Conflict),
+            "broken" | "broken-link" => Some(Self::BrokenLink),
+            _ => None,
+        }
+    }
+
+    /// 转成命令行/JSON 里的字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unique => "unique",
+            Self::Identical => "identical",
+            Self::Conflict => "conflict",
+            Self::BrokenLink => "broken-link",
+        }
+    }
+}
+
 /// 用户对一条散落 skill 选定的处置方式。
 ///
 /// 界面上每个散落条目按 `relation` 给出可选项，用户点哪个就走哪个。
@@ -148,6 +172,57 @@ pub enum OrphanAction {
     Delete,
     /// 坏链接：删掉链接文件本身，不碰任何真实内容
     RemoveLink,
+}
+
+impl OrphanAction {
+    /// 从命令行字符串解析。
+    ///
+    /// 同时接受 kebab-case（`take-orphan`）和下划线写法，
+    /// 以及几个直观别名（`use-orphan` / `use-shared` / `link` / `remove`），
+    /// 因为不同人对同一动作的说法不一样，逼人记唯一种写法没意义。
+    pub fn parse(s: &str) -> Option<Self> {
+        let norm = s.trim().to_lowercase().replace('_', "-");
+        match norm.as_str() {
+            "import" | "move-in" => Some(Self::Import),
+            "dedupe" | "dedup" => Some(Self::Dedupe),
+            "take-orphan" | "use-orphan" | "keep-orphan" => Some(Self::TakeOrphan),
+            "take-shared" | "use-shared" | "keep-shared" => Some(Self::TakeShared),
+            "delete" | "rm" => Some(Self::Delete),
+            "remove-link" | "unlink" => Some(Self::RemoveLink),
+            _ => None,
+        }
+    }
+
+    /// 转成命令行/JSON 里的字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::Dedupe => "dedupe",
+            Self::TakeOrphan => "take-orphan",
+            Self::TakeShared => "take-shared",
+            Self::Delete => "delete",
+            Self::RemoveLink => "remove-link",
+        }
+    }
+
+    /// 这个动作要求散落副本和中心库处于哪种关系。
+    ///
+    /// 用来在动手前拦掉明显不对的组合 —— 比如对一个内容相同的副本
+    /// 选「采用散落版」，那是把同一份内容自己覆盖自己，虽然不会出错，
+    /// 但会白白备份一次，也说明用户没看清扫描结果。
+    ///
+    /// 返回空数组表示「任何关系都可以」（`Delete` / `RemoveLink` 属于这类）。
+    pub fn allowed_relations(self) -> &'static [OrphanRelation] {
+        use OrphanRelation::*;
+        match self {
+            Self::Import => &[Unique, Conflict],
+            Self::Dedupe => &[Identical, Conflict],
+            Self::TakeOrphan => &[Conflict, Unique],
+            Self::TakeShared => &[Conflict, Identical],
+            Self::Delete => &[],
+            Self::RemoveLink => &[],
+        }
+    }
 }
 
 /// 一条处置执行结果。界面把它逐条显示在 dialog 下方。

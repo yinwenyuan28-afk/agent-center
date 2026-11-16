@@ -4,9 +4,54 @@
 //! 便于脚本调用和人工排查。所有输出保持 ASCII 安全，避免 Windows
 //! 终端在 GBK 代码页下花屏。
 
-use crate::cli::{Command, GitCmd, SkillsCmd};
+use crate::cli::{BridgeCmd, Command, DocCmd, GitCmd, SkillsCmd};
 use crate::config::Config;
 use crate::{git, link, skills, skillscli};
+
+// 一次 CLI 调用的全局开关。
+//
+// `--json` 是全局参数，但执行函数拿不到 `Cli` 结构（它只有 `command`）。
+// 所以由 `main` 在分派前写进这个线程局部变量，执行函数从这里读。
+//
+// 用线程局部而不是全局静态：CLI 只在主线程跑，线程局部语义更窄，
+// 测试并行跑也不会互相污染。
+thread_local! {
+    static JSON_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 设置是否走 JSON 输出。
+pub fn set_json_mode(on: bool) {
+    JSON_MODE.with(|c| c.set(on));
+}
+
+/// 当前是否走 JSON 输出。
+fn json_mode() -> bool {
+    JSON_MODE.with(|c| c.get())
+}
+
+/// 输出一个可序列化的值。
+///
+/// JSON 模式下打印缩进 JSON；非 JSON 模式返回 false，让调用方走原来的
+/// 文本输出路径。这样每个读命令只需要在一个地方开头试一次。
+fn print_json<T: serde::Serialize>(value: &T) -> bool {
+    if !json_mode() {
+        return false;
+    }
+    match serde_json::to_string_pretty(value) {
+        Ok(s) => {
+            println!("{s}");
+            true
+        }
+        Err(e) => {
+            // 序列化失败极少见（都是我们自己定义的结构），但真发生时
+            // 静默输出空对象会让调用方以为「没有数据」，所以打到 stderr
+            // 并以非零退出，由调用方决定。
+            eprintln!("JSON 序列化失败: {e}");
+            true
+        }
+    }
+}
+
 
 /// 执行一条子命令，返回进程退出码。
 pub fn run(cmd: Command) -> i32 {
@@ -24,7 +69,28 @@ pub fn run(cmd: Command) -> i32 {
                     return 1;
                 }
             };
-            for spec in cfg.resolved_mappings() {
+            let specs = cfg.resolved_mappings();
+            // JSON 模式下把所有映射当成一个数组输出，agent 直接按字段取值，
+            // 不用解析列宽对齐的文本
+            if print_json(
+                &specs
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "agent": s.agent,
+                            "label": s.label,
+                            "source": crate::config::contract_tilde(&s.source),
+                            "target": crate::config::contract_tilde(&s.target),
+                            "mode": s.mode,
+                            "disabled": s.disabled,
+                            "installed": s.config_dir.exists(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            ) {
+                return 0;
+            }
+            for spec in specs {
                 println!(
                     "{:<12} {:<40} -> {}",
                     spec.agent,
@@ -43,8 +109,23 @@ pub fn run(cmd: Command) -> i32 {
                 }
             };
             let mut problems = 0;
+            let mut rows = Vec::new();
             for spec in cfg.resolved_mappings() {
                 let m = link::inspect(&spec);
+                // 计数只关心「装了、没取消、但不 ok」
+                if !matches!(m.health, crate::types::HealthState::Ok) && m.installed && !m.disabled {
+                    problems += 1;
+                }
+                rows.push(m);
+            }
+
+            if print_json(&rows) {
+                // JSON 模式下把「需要处理」的项数也带出去，退出码保持同样语义，
+                // 调用方既能读结构化结果又能靠退出码做粗判断
+                return if problems > 0 { 2 } else { 0 };
+            }
+
+            for m in &rows {
                 let health = format!("{:?}", m.health).to_lowercase();
                 let kind = m
                     .actual
@@ -56,9 +137,6 @@ pub fn run(cmd: Command) -> i32 {
                 );
                 if m.disabled {
                     println!("             └ 已取消映射，同步会跳过");
-                }
-                if !matches!(m.health, crate::types::HealthState::Ok) && m.installed && !m.disabled {
-                    problems += 1;
                 }
             }
             println!("\n{problems} 项需要处理");
@@ -114,16 +192,219 @@ pub fn run(cmd: Command) -> i32 {
         }
         Command::Unmap { agent } => run_unmap(&agent),
         Command::Remap { agent } => run_remap(&agent),
+        Command::Doc(sub) => run_doc(sub),
         Command::Skills(sub) => run_skills(sub),
         Command::Creds(sub) => run_creds(sub),
         Command::Providers(sub) => run_providers(sub),
         Command::Claude(sub) => run_claude(sub),
+        Command::Bridge(sub) => run_bridge(sub),
         Command::Mcp(sub) => run_mcp(sub),
         Command::Usage(sub) => run_usage(sub),
         Command::Agents => run_agents(),
         Command::Models(sub) => run_models(sub),
         Command::Git(sub) => run_git(sub),
     }
+}
+
+/// Claude 本地协议转换端口的控制。
+fn run_bridge(cmd: BridgeCmd) -> i32 {
+    use crate::providers::claude_bridge as bridge;
+
+    match cmd {
+        BridgeCmd::Status => {
+            let st = bridge::status_report();
+            if print_json(&st) {
+                return 0;
+            }
+            println!(
+                "端口      {} ({})",
+                st.port,
+                if !st.listening {
+                    "没有进程在听"
+                } else if st.ours {
+                    "agentcenter 转换层在听"
+                } else {
+                    "被其它程序占用"
+                }
+            );
+            println!("转换配置  {}{}", st.config_path, if st.configured { "" } else { "（不存在）" });
+            if st.configured {
+                println!("上游      {} ({})", st.upstream, st.kind);
+            }
+            match st.pid {
+                Some(pid) => println!("后台进程  pid {pid}"),
+                None => println!("后台进程  无"),
+            }
+            if !st.listening && st.configured {
+                println!();
+                println!("Claude 走非 Anthropic 协议时需要这个端口。用 `agentcenter bridge start` 拉起。");
+            }
+            0
+        }
+
+        BridgeCmd::Run => match bridge::run_blocking() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        },
+
+        BridgeCmd::Start => match bridge::start_detached() {
+            Ok(pid) => {
+                println!("转换端口已启动，pid {pid}");
+                println!("Claude 的 ANTHROPIC_BASE_URL 指向 {}", bridge::bridge_base_url());
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        },
+
+        BridgeCmd::Stop => match bridge::stop_detached() {
+            Ok(Some(pid)) => {
+                println!("已停掉转换进程 pid {pid}");
+                0
+            }
+            Ok(None) => {
+                println!("没有后台运行的转换进程");
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        },
+    }
+}
+
+/// 母版指令文件的读写。
+///
+/// 边界和图形界面一致：`write` 覆盖，`create` 只在不存在时写。
+/// 内容来源支持 `--file` 和标准输入两种 —— agent 调用时用管道更自然
+/// （避免为了写一段文本先落一个临时文件）。
+fn run_doc(cmd: DocCmd) -> i32 {
+    use crate::doc;
+
+    match cmd {
+        DocCmd::Path => {
+            let p = doc::doc_path();
+            let shown = crate::config::contract_tilde(&p);
+            if print_json(&serde_json::json!({
+                "path": shown,
+                // 绝对路径里的分隔符统一成反斜杠：这是给调用方直接传给
+                // 文件 API 用的，混着 "C:\\Users\\leaf\\.agents/AGENTS.md"
+                // 这种形态在某些工具里会被当成两个不同路径
+                "absolutePath": p.display().to_string().replace('/', "\\"),
+                "exists": p.exists(),
+                "bytes": if p.exists() {
+                    std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0)
+                } else {
+                    0
+                },
+            })) {
+                return 0;
+            }
+            println!("{shown}");
+            println!("是否存在  {}", if p.exists() { "是" } else { "否" });
+            0
+        }
+
+        DocCmd::Read => match doc::read() {
+            Ok(d) => {
+                if print_json(&serde_json::json!({
+                    "path": crate::config::contract_tilde(&doc::doc_path()),
+                    "exists": d.exists,
+                    "content": d.content,
+                    "bytes": d.content.len(),
+                })) {
+                    return 0;
+                }
+                if !d.exists {
+                    eprintln!("母版不存在：{}", doc::doc_path().display());
+                    return 1;
+                }
+                // 原样输出，不加任何装饰 —— 这是文件内容，调用方可能要重定向
+                print!("{}", d.content);
+                if !d.content.ends_with('\n') {
+                    println!();
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("读取失败: {e}");
+                1
+            }
+        },
+
+        DocCmd::Write { file } => {
+            let content = match read_content_arg(file.as_deref()) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
+            let r = doc::write(&content);
+            println!("{}", r.output);
+            if r.ok {
+                0
+            } else {
+                r.exit_code
+            }
+        }
+
+        DocCmd::Create { file } => {
+            let content = match read_content_arg(file.as_deref()) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
+            match doc::create(&content) {
+                r if r.ok => {
+                    println!("{}", r.output);
+                    0
+                }
+                r => {
+                    // 已存在时 create 会拒绝。这是有意的保护，
+                    // 但要给出可执行的下一步，否则调用方只能猜
+                    eprintln!("{}", r.output);
+                    eprintln!("要覆盖请用 `agentcenter doc write`");
+                    r.exit_code
+                }
+            }
+        }
+    }
+}
+
+/// 读 `--file` 指定的文件，或从标准输入读全部内容。
+///
+/// 标准输入为空时报错：`doc write` 拿到空内容会把母版清空，
+/// 这在脚本里很容易因为管道接错而发生，所以宁可拒绝。
+fn read_content_arg(file: Option<&str>) -> Result<String, String> {
+    use std::io::Read;
+
+    let content = match file {
+        Some(path) => std::fs::read_to_string(path)
+            .map_err(|e| format!("读取 {path} 失败: {e}"))?,
+        None => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| format!("读取标准输入失败: {e}"))?;
+            buf
+        }
+    };
+
+    if content.trim().is_empty() {
+        return Err(
+            "内容为空，已中止。要从文件读请用 --file <路径>，或通过管道传入内容".to_string(),
+        );
+    }
+    Ok(content)
 }
 
 /// 取消映射：删掉目标链接并写「已取消」标记。
@@ -206,6 +487,51 @@ fn run_remap(agent: &str) -> i32 {
 /// 新增 agent 后跑一下，能确认清单、路径、能力标记都对。
 fn run_agents() -> i32 {
     use crate::agents;
+
+    // JSON 模式：直接给出结构化能力表。这是 skill 最需要的入口 ——
+    // 「这个 agent 支持哪种注入」全靠它判断，解析定宽表格太脆
+    if print_json(
+        &agents::all()
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "id": a.id(),
+                    "label": a.label(),
+                    "order": a.order(),
+                    "installed": a.installed(),
+                    "configDir": crate::config::contract_tilde(&a.config_dir()),
+                    "instructionFile": a
+                        .instruction_file()
+                        .map(|p| crate::config::contract_tilde(&p)),
+                    "skillsDir": crate::config::contract_tilde(&a.skills_dir()),
+                    "readsSharedSkills": a.reads_shared_skills(),
+                    "supportsProvider": a.supports_provider(),
+                    "providerReady": a.provider_ready(),
+                    "providerTargets": a
+                        .provider_targets()
+                        .iter()
+                        .map(|p| crate::config::contract_tilde(p))
+                        .collect::<Vec<_>>(),
+                    "singleSlot": a.single_slot(),
+                    "supportedKinds": a
+                        .supported_kinds()
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>(),
+                    "supportsMcp": a.supports_mcp(),
+                    "mcpReady": a.mcp_ready(),
+                    "supportsUsage": a.supports_usage(),
+                    "usageSources": a
+                        .usage_sources()
+                        .iter()
+                        .map(|p| crate::config::contract_tilde(p))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    ) {
+        return 0;
+    }
 
     println!(
         "{:<12} {:<20} {:<6} {:<9} {:<9} {:<6} {}",
@@ -320,6 +646,28 @@ fn run_models(cmd: crate::cli::ModelsCmd) -> i32 {
     }
 }
 
+/// 把一条 MCP server 转成 JSON 视图。
+///
+/// `env` / `headers` 只给**键名**，不给值 —— 和界面一致：远程型的
+/// headers 里常放 Authorization，stdio 型的 env 里常放 key。
+/// 需要看值就打开 `~/.agents/mcp.toml`，那是本地明文文件。
+fn mcp_server_json(s: &crate::mcp::model::McpServer) -> serde_json::Value {
+    serde_json::json!({
+        "id": s.id,
+        "name": s.display_name(),
+        "transport": s.transport.as_str(),
+        "command": s.command,
+        "args": s.args,
+        "cwd": s.cwd,
+        "url": s.url,
+        "envKeys": s.env.keys().collect::<Vec<_>>(),
+        "headerKeys": s.headers.keys().collect::<Vec<_>>(),
+        "enabled": s.enabled,
+        "agents": s.agents,
+        "note": s.note,
+    })
+}
+
 /// MCP server 统一管理子命令。
 fn run_mcp(cmd: crate::cli::McpCmd) -> i32 {
     use crate::cli::McpCmd;
@@ -334,6 +682,12 @@ fn run_mcp(cmd: crate::cli::McpCmd) -> i32 {
                     return 1;
                 }
             };
+            if print_json(&serde_json::json!({
+                "masterPath": store::path().display().to_string(),
+                "servers": list.iter().map(mcp_server_json).collect::<Vec<_>>(),
+            })) {
+                return 0;
+            }
             if list.is_empty() {
                 println!("母版里还没有 MCP server。");
                 println!("用 `agentcenter mcp example` 看格式。");
@@ -369,6 +723,10 @@ fn run_mcp(cmd: crate::cli::McpCmd) -> i32 {
                     return 1;
                 }
             };
+
+            if print_json(&report) {
+                return 0;
+            }
 
             if report.lines.is_empty() {
                 println!("母版是空的，或各 agent 都没有 MCP 配置。");
@@ -410,8 +768,31 @@ fn run_mcp(cmd: crate::cli::McpCmd) -> i32 {
                 return 1;
             }
 
+            // 运行中的 agent 会在退出时用内存状态覆盖配置。
+            // 只在真正写入前提醒，dry-run 不需要
+            if !dry_run {
+                let running = crate::agents::running_agents();
+                if !running.is_empty() {
+                    eprintln!(
+                        "[提醒] 这些 agent 正在运行，它们可能会用内存状态覆盖刚写入的配置：{}",
+                        running.join(", ")
+                    );
+                    eprintln!("       建议先退出它们再同步。");
+                }
+            }
+
             match crate::mcp::sync_run(&list, dry_run) {
                 Ok(r) => {
+                    if print_json(&serde_json::json!({
+                        "dryRun": dry_run,
+                        "ok": r.ok,
+                        "written": r.written,
+                        "skipped": r.skipped,
+                        "backups": r.backups,
+                        "log": r.log,
+                    })) {
+                        return if r.ok { 0 } else { 1 };
+                    }
                     if dry_run {
                         println!("=== 预览（未写入）===\n");
                     }
@@ -443,11 +824,314 @@ fn run_mcp(cmd: crate::cli::McpCmd) -> i32 {
             }
         }
 
+        McpCmd::Add {
+            id,
+            name,
+            transport,
+            command,
+            args,
+            cwd,
+            url,
+            env,
+            headers,
+            disabled,
+            agents,
+            note,
+            clear_env,
+            clear_headers,
+        } => run_mcp_add(McpAddArgs {
+            id,
+            name,
+            transport,
+            command,
+            args,
+            cwd,
+            url,
+            env,
+            headers,
+            disabled,
+            agents,
+            note,
+            clear_env,
+            clear_headers,
+        }),
+
+        McpCmd::Remove { id } => {
+            let mut list = match store::load() {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("读取母版失败: {e}");
+                    return 1;
+                }
+            };
+            let before = list.len();
+            list.retain(|s| s.id != id);
+            if list.len() == before {
+                eprintln!("母版里没有 {id}");
+                return 1;
+            }
+            if let Err(e) = store::save(&list) {
+                eprintln!("保存失败: {e}");
+                return 1;
+            }
+            println!("已从母版移除 {id}");
+            println!("已注入到各 agent 的条目要再跑一次 `agentcenter mcp sync` 才会清理。");
+            0
+        }
+
+        McpCmd::Assign { id, agents } => match crate::mcp::matrix::set_row(&id, &agents) {
+            Ok(()) => {
+                println!(
+                    "已设置 {id} 的分配：{}",
+                    if agents.is_empty() {
+                        "（无）".to_string()
+                    } else {
+                        agents.join(", ")
+                    }
+                );
+                println!("跑 `agentcenter mcp sync` 让它生效。");
+                0
+            }
+            Err(e) => {
+                eprintln!("设置失败: {e}");
+                1
+            }
+        },
+
+        McpCmd::Matrix => match crate::mcp::matrix::build() {
+            Ok(m) => {
+                if print_json(&m) {
+                    return 0;
+                }
+                if m.rows.is_empty() {
+                    println!("母版里还没有 MCP server。");
+                    return 0;
+                }
+                let labels: Vec<&str> = m.columns.iter().map(|c| c.label.as_str()).collect();
+                println!("{:<24} {:<10} {}", "server", "transport", labels.join("  "));
+                println!("{}", "-".repeat(24 + 1 + 10 + 1 + labels.len() * 8));
+                for r in &m.rows {
+                    let marks: Vec<&str> = m
+                        .columns
+                        .iter()
+                        .map(|c| {
+                            if !c.available {
+                                "  - "
+                            } else if r.assigned.iter().any(|a| a == &c.agent) {
+                                "  ✓ "
+                            } else {
+                                "    "
+                            }
+                        })
+                        .collect();
+                    println!("{:<24} {:<10} {}", r.id, r.transport, marks.join(""));
+                }
+                let available = m.columns.iter().filter(|c| c.available).count();
+                println!("\n共 {} 个 server，{} 个可用 agent。", m.rows.len(), available);
+                0
+            }
+            Err(e) => {
+                eprintln!("读取失败: {e}");
+                1
+            }
+        },
+
+        McpCmd::Import => match crate::mcp::matrix::import_from_agents() {
+            Ok(added) => {
+                if added.is_empty() {
+                    println!("没有新的 server 可导入");
+                } else {
+                    println!("已导入 {} 个 server：{}", added.len(), added.join(", "));
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("导入失败: {e}");
+                1
+            }
+        },
+
         McpCmd::Example => {
             println!("{}", store::example_content());
             0
         }
     }
+}
+
+/// `mcp add` 的参数束。
+///
+/// 字段多，直接展开到函数签名会让调用处难以阅读，所以打成一个结构。
+/// 每个字段的含义和 CLI 参数一一对应，见 [`crate::cli::McpCmd::Add`]。
+struct McpAddArgs {
+    id: String,
+    name: Option<String>,
+    transport: Option<String>,
+    command: Option<String>,
+    args: Vec<String>,
+    cwd: Option<String>,
+    url: Option<String>,
+    env: Vec<String>,
+    headers: Vec<String>,
+    disabled: bool,
+    agents: Vec<String>,
+    note: Option<String>,
+    clear_env: bool,
+    clear_headers: bool,
+}
+
+/// `mcp add`：新增或更新母版里的一条 server。
+///
+/// 更新时只覆盖显式给出的字段，没给的保持原值 —— 和 `providers set`
+/// 的语义一致。`--clear-env` / `--clear-headers` 是显式的清空开关，
+/// 因为「没传 --env」和「传了空的 --env」在命令行上没法区分。
+fn run_mcp_add(a: McpAddArgs) -> i32 {
+    use crate::mcp::model::{McpServer, Transport};
+    use crate::mcp::store;
+
+    let mut list = match store::load() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("读取母版失败: {e}");
+            return 1;
+        }
+    };
+
+    let env_pairs = match parse_pairs(&a.env, "=", "--env") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let header_pairs = match parse_pairs(&a.headers, ":", "--header") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+
+    let existing = list.iter().position(|s| s.id == a.id);
+    let is_new = existing.is_none();
+
+    let mut server = match existing {
+        Some(i) => list[i].clone(),
+        None => McpServer {
+            id: a.id.clone(),
+            name: String::new(),
+            transport: Transport::Stdio,
+            command: String::new(),
+            args: Vec::new(),
+            cwd: String::new(),
+            url: String::new(),
+            headers: Default::default(),
+            env: Default::default(),
+            enabled: true,
+            agents: Vec::new(),
+            note: String::new(),
+        },
+    };
+
+    if let Some(v) = a.name {
+        server.name = v;
+    }
+    if let Some(v) = a.transport {
+        server.transport = Transport::parse(&v);
+    }
+    if let Some(v) = a.command {
+        server.command = v;
+    }
+    if !a.args.is_empty() {
+        server.args = a.args;
+    }
+    if let Some(v) = a.cwd {
+        server.cwd = v;
+    }
+    if let Some(v) = a.url {
+        server.url = v;
+    }
+    if a.clear_env {
+        server.env.clear();
+    }
+    for (k, v) in env_pairs {
+        server.env.insert(k, v);
+    }
+    if a.clear_headers {
+        server.headers.clear();
+    }
+    for (k, v) in header_pairs {
+        server.headers.insert(k, v);
+    }
+    if a.disabled {
+        server.enabled = false;
+    }
+    if !a.agents.is_empty() {
+        // 和 matrix::set_row 同一条规则：只接受已知且支持 MCP 注入的 agent
+        let known: Vec<&'static str> = crate::agents::mcp_capable()
+            .iter()
+            .map(|x| x.id())
+            .collect();
+        server.agents = a
+            .agents
+            .into_iter()
+            .filter(|x| known.contains(&x.as_str()))
+            .fold(Vec::new(), |mut acc, x| {
+                if !acc.contains(&x) {
+                    acc.push(x);
+                }
+                acc
+            });
+    }
+    if let Some(v) = a.note {
+        server.note = v;
+    }
+
+    if let Some(err) = server.validate() {
+        eprintln!("{err}");
+        return 1;
+    }
+
+    match existing {
+        Some(i) => list[i] = server,
+        None => list.push(server),
+    }
+
+    if let Err(e) = store::save(&list) {
+        eprintln!("保存失败: {e}");
+        return 1;
+    }
+
+    println!("{} MCP server {}", if is_new { "已新增" } else { "已更新" }, a.id);
+    if let Some(warn) = store::check_gitignore() {
+        println!("\n[警告] {warn}");
+    }
+    println!("跑 `agentcenter mcp diff` 看会发生什么，`agentcenter mcp sync` 生效。");
+    0
+}
+
+/// 解析 `KEY=VALUE` / `KEY: VALUE` 形式的重复参数。
+///
+/// 只在**第一个**分隔符处切分，所以值里可以再包含分隔符
+/// （URL、Base64 里的 `=`，header 值里的 `:` 都常见）。
+fn parse_pairs(
+    items: &[String],
+    sep: &str,
+    flag: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for item in items {
+        let Some((k, v)) = item.split_once(sep) else {
+            return Err(format!(
+                "{flag} 格式应为 KEY{sep}VALUE，收到：{item}"
+            ));
+        };
+        let k = k.trim();
+        if k.is_empty() {
+            return Err(format!("{flag} 的键不能为空：{item}"));
+        }
+        out.push((k.to_string(), v.trim().to_string()));
+    }
+    Ok(out)
 }
 
 /// Claude Code 的首次引导开关。
@@ -749,6 +1433,34 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                     return 1;
                 }
             };
+            if print_json(
+                &list
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "id": p.id,
+                            "name": p.name,
+                            "baseUrl": p.base_url,
+                            "kind": p.kind.as_str(),
+                            "agentKinds": p
+                                .agent_kinds
+                                .iter()
+                                .map(|(a, k)| (a.clone(), k.as_str().to_string()))
+                                .collect::<std::collections::BTreeMap<_, _>>(),
+                            "models": p.models,
+                            "agents": p.agents,
+                            "codexModel": p.codex_model,
+                            "codexRequiresOpenaiAuth": p.codex_requires_openai_auth,
+                            // 只给长度和末尾 4 位，和界面一致：密钥原文不出这个进程
+                            "keyLen": p.api_key.len(),
+                            "keyTail": p.api_key.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>(),
+                            "note": p.note,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            ) {
+                return 0;
+            }
             if list.is_empty() {
                 println!("母版里还没有 provider。");
                 println!("用 `agentcenter providers example` 看格式，或 `providers set` 添加。");
@@ -786,6 +1498,10 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                     return 1;
                 }
             };
+
+            if print_json(&report) {
+                return 0;
+            }
 
             if report.lines.is_empty() {
                 println!("母版是空的。先定义 provider 再对比。");
@@ -837,8 +1553,30 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                 return 1;
             }
 
+            // 运行中的 agent 会在退出时用内存状态覆盖配置。只在真写时提醒
+            if !dry_run {
+                let running = crate::agents::running_agents();
+                if !running.is_empty() {
+                    eprintln!(
+                        "[提醒] 这些 agent 正在运行，它们可能会用内存状态覆盖刚写入的配置：{}",
+                        running.join(", ")
+                    );
+                    eprintln!("       建议先退出它们再同步。");
+                }
+            }
+
             match crate::providers::sync(&list, dry_run) {
                 Ok(r) => {
+                    if print_json(&serde_json::json!({
+                        "dryRun": dry_run,
+                        "ok": r.ok,
+                        "written": r.written,
+                        "skipped": r.skipped,
+                        "backups": r.backups,
+                        "log": r.log,
+                    })) {
+                        return if r.ok { 0 } else { 1 };
+                    }
                     if dry_run {
                         println!("=== 预览（未写入）===\n");
                     }
@@ -853,7 +1591,7 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                     }
                     if dry_run {
                         println!(
-                            "\n将写入 {} 个文件，跳过 {} 个。加 --no-dry-run 才真正执行。",
+                            "\n将写入 {} 个文件，跳过 {} 个。去掉 --dry-run 才真正执行。",
                             r.written.len(),
                             r.skipped.len()
                         );
@@ -1052,6 +1790,10 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                 }
             };
 
+            if print_json(&m) {
+                return 0;
+            }
+
             if m.providers.is_empty() {
                 println!("母版里还没有 provider。");
                 return 0;
@@ -1149,6 +1891,10 @@ fn run_creds(cmd: crate::cli::CredsCmd) -> i32 {
         CredsCmd::Inspect => {
             let overview = crate::credentials::inspect();
 
+            if print_json(&overview) {
+                return 0;
+            }
+
             println!(
                 "共 {} 条凭证，{} 个不同 key\n",
                 overview.total_entries, overview.unique_keys
@@ -1199,6 +1945,180 @@ fn run_creds(cmd: crate::cli::CredsCmd) -> i32 {
     }
 }
 
+/// `skills apply`：对一条散落 skill 执行选定处置。
+///
+/// 三种用法：
+/// - `--dry-run`：只列每条散落 skill 可用的动作，不动任何东西
+/// - `--path <路径> --action <动作>`：直接指定，最确定
+/// - `<name> --action <动作>`：按名字找，重名时报错让人改用 `--path`
+///
+/// ## 为什么要重新扫描
+///
+/// 不信任调用方传进来的路径和先前 `scan` 的结果：`scan` 和 `apply` 之间
+/// 用户完全可能在资源管理器里动过文件。所以每次都重新扫一遍，用最新结果
+/// 校验目标还在不在、关系是什么。
+///
+/// ## 为什么校验关系和动作的搭配
+///
+/// 「对内容相同的副本选采用散落版」这类组合不会出错，但会白白备份一次，
+/// 也说明调用方没看清扫描结果。报错比默默执行更有用。
+fn run_skills_apply(
+    tags: &crate::config::SkillTags,
+    name: Option<String>,
+    path: Option<String>,
+    action: Option<String>,
+    dry_run: bool,
+) -> i32 {
+    use crate::types::OrphanAction;
+
+    // ---- 参数校验先行 ----
+    //
+    // 动作名拼错要在碰磁盘之前就报出来。放到扫描之后会导致「目标不存在」
+    // 盖过「动作名不认识」这个更根本的问题，调用方会去查路径而不是改参数。
+
+    let action = match action.as_deref() {
+        Some(s) => match OrphanAction::parse(s) {
+            Some(a) => Some(a),
+            None => {
+                eprintln!("不认识的动作：{s}");
+                eprintln!(
+                    "可用值：import / dedupe / take-orphan / take-shared / delete / remove-link"
+                );
+                return 1;
+            }
+        },
+        None => None,
+    };
+
+    if !dry_run && action.is_none() {
+        eprintln!("缺少 --action。");
+        eprintln!(
+            "可用值：import / dedupe / take-orphan / take-shared / delete / remove-link"
+        );
+        eprintln!("先跑 `agentcenter skills apply --dry-run` 看每条散落项各自能用哪个。");
+        return 1;
+    }
+
+    if !dry_run && path.is_none() && name.is_none() {
+        eprintln!(
+            "要处置哪一条？用 --path <路径> 或 <name>。先跑 `agentcenter skills scan` 看清单。"
+        );
+        return 1;
+    }
+
+    let orphans = match crate::skills::scan_orphans(tags) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("扫描失败: {e}");
+            return 1;
+        }
+    };
+
+    // 干跑：列出全部散落项和各自可用的动作
+    if dry_run {
+        if orphans.is_empty() {
+            println!("没有发现散落的 skill");
+            return 0;
+        }
+        if print_json(&orphans) {
+            return 0;
+        }
+        println!("散落 skill 及可用动作：\n");
+        for o in &orphans {
+            println!("{}  ({})", o.name, o.location);
+            println!("  relation  {}", o.relation.as_str());
+            println!("  path      {}", o.path);
+            if !o.description.is_empty() {
+                let desc: String = o.description.chars().take(80).collect();
+                println!("  desc      {desc}");
+            }
+            let actions: Vec<&str> = available_actions(o.relation)
+                .iter()
+                .map(|a| a.as_str())
+                .collect();
+            println!("  可用动作  {}", actions.join(" / "));
+            println!();
+        }
+        println!("执行示例：");
+        println!("  agentcenter skills apply --path \"<上面的 path>\" --action import");
+        return 0;
+    }
+
+    // 到这里 action 一定有值（前面已拦）
+    let action = action.expect("action 已在参数校验阶段确认非空");
+
+    // 定位目标：--path 优先，其次按 name
+    let target = match (&path, &name) {
+        (Some(p), _) => orphans.iter().find(|o| &o.path == p),
+        (None, Some(n)) => {
+            let hits: Vec<&crate::types::OrphanSkill> =
+                orphans.iter().filter(|o| &o.name == n).collect();
+            match hits.len() {
+                0 => None,
+                1 => Some(hits[0]),
+                _ => {
+                    // 同名散落在多个 agent 目录里，按名字分不清要处置哪一个
+                    eprintln!("有 {} 条名为 {n} 的散落 skill，请用 --path 指定：", hits.len());
+                    for h in hits {
+                        eprintln!("  {}  ({})", h.path, h.location);
+                    }
+                    return 1;
+                }
+            }
+        }
+        (None, None) => unreachable!("已在参数校验阶段拦截"),
+    };
+
+    let Some(o) = target.cloned() else {
+        eprintln!("扫描结果里没有这条。可能已经被处理过，或路径写错了。");
+        eprintln!("跑 `agentcenter skills scan` 看当前清单。");
+        return 1;
+    };
+
+    // 关系与动作的搭配校验
+    let allowed = action.allowed_relations();
+    if !allowed.is_empty() && !allowed.contains(&o.relation) {
+        eprintln!(
+            "{} 现在的关系是 {}，用不了 {} 这个动作。",
+            o.name,
+            o.relation.as_str(),
+            action.as_str()
+        );
+        let actions: Vec<&str> = available_actions(o.relation)
+            .iter()
+            .map(|a| a.as_str())
+            .collect();
+        eprintln!("这个关系下可用：{}", actions.join(" / "));
+        eprintln!("跑 `agentcenter skills apply --dry-run` 看全部散落项和各自可用的动作。");
+        return 1;
+    }
+
+    let result = crate::skills::apply_action(&o.path, action);
+
+    if print_json(&result) {
+        return if result.ok { 0 } else { 1 };
+    }
+
+    if result.ok {
+        println!("[{}] {}：{}", result.action.as_str(), result.name, result.message);
+        0
+    } else {
+        eprintln!("[失败] {}：{}", result.name, result.message);
+        1
+    }
+}
+
+/// 某种关系下可用的动作。与界面上的按钮组合保持一致。
+fn available_actions(relation: crate::types::OrphanRelation) -> Vec<crate::types::OrphanAction> {
+    use crate::types::{OrphanAction::*, OrphanRelation::*};
+    match relation {
+        Unique => vec![Import, Delete],
+        Identical => vec![Dedupe, Delete],
+        Conflict => vec![TakeOrphan, TakeShared, Delete],
+        BrokenLink => vec![RemoveLink],
+    }
+}
+
 /// skill 子命令。
 fn run_skills(cmd: SkillsCmd) -> i32 {
     let cfg = match Config::load() {
@@ -1213,6 +2133,9 @@ fn run_skills(cmd: SkillsCmd) -> i32 {
         SkillsCmd::List => {
             match skills::list_skills(&cfg.skills.tags) {
                 Ok(list) => {
+                    if print_json(&list) {
+                        return 0;
+                    }
                     for s in list {
                         let managed = if s.managed { "managed" } else { "-" };
                         let tags = if s.tags.is_empty() {
@@ -1244,6 +2167,9 @@ fn run_skills(cmd: SkillsCmd) -> i32 {
         }
         SkillsCmd::Scan => match skills::scan_orphans(&cfg.skills.tags) {
             Ok(orphans) => {
+                if print_json(&orphans) {
+                    return 0;
+                }
                 if orphans.is_empty() {
                     println!("没有发现散落的 skill");
                     return 0;
@@ -1264,6 +2190,12 @@ fn run_skills(cmd: SkillsCmd) -> i32 {
                 1
             }
         },
+        SkillsCmd::Apply {
+            name,
+            path,
+            action,
+            dry_run,
+        } => run_skills_apply(&cfg.skills.tags, name, path, action, dry_run),
         SkillsCmd::Collect { apply } => {
             let orphans = match skills::scan_orphans(&cfg.skills.tags) {
                 Ok(o) => o,
@@ -1273,6 +2205,12 @@ fn run_skills(cmd: SkillsCmd) -> i32 {
                 }
             };
             let plan = skills::build_plan(orphans);
+
+            if print_json(&plan) {
+                // `--json` 只报告计划，不执行。要执行必须不带 --json 加 --apply，
+                // 避免调用方以为「看到 JSON 就已经做了」
+                return 0;
+            }
 
             println!("移入 {} 个", plan.to_import.len());
             for o in &plan.to_import {
@@ -1358,6 +2296,9 @@ fn run_usage(cmd: crate::cli::UsageCmd) -> i32 {
     match cmd {
         UsageCmd::Status => {
             let report = crate::usage::collect_report(0, false);
+            if print_json(&report.agents) {
+                return 0;
+            }
             println!("{:<10} {:<12} {:<8} {:<8} {}", "AGENT", "SUPPORTED", "ENABLED", "SOURCE?", "DATA");
             for a in &report.agents {
                 // 不支持的 agent 也要列出来，否则用户会以为这里漏了
@@ -1392,6 +2333,11 @@ fn run_usage(cmd: crate::cli::UsageCmd) -> i32 {
 
         UsageCmd::Report { days, refresh } => {
             let report = crate::usage::collect_report(days, refresh);
+
+            if print_json(&report) {
+                return 0;
+            }
+
             let enabled: Vec<_> = report.agents.iter().filter(|a| a.enabled).collect();
 
             if enabled.is_empty() {

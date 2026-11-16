@@ -9,6 +9,13 @@ use clap::{Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(name = "agentcenter", version, about, long_about = None)]
 pub struct Cli {
+    /// 以 JSON 输出结果，供脚本和 agent 解析。
+    ///
+    /// 只作用于读命令（status / mappings / agents / * list / * diff /
+    /// * matrix / * inspect / usage report）。写命令仍输出人话文本。
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -27,6 +34,10 @@ pub enum Command {
 
     /// 列出所有映射
     Mappings,
+
+    /// 母版指令文件（~/.agents/AGENTS.md）的读写
+    #[command(subcommand)]
+    Doc(DocCmd),
 
     /// 取消某个 agent 的映射：删掉目标链接并记下「已取消」
     Unmap {
@@ -55,6 +66,10 @@ pub enum Command {
     /// Claude Code 的首次引导开关（写 ~/.claude.json）
     #[command(subcommand)]
     Claude(ClaudeCmd),
+
+    /// Claude 的本地协议转换端口（127.0.0.1:15722）
+    #[command(subcommand)]
+    Bridge(BridgeCmd),
 
     /// MCP server 统一管理
     #[command(subcommand)]
@@ -99,10 +114,37 @@ pub enum SkillsCmd {
     Scan,
 
     /// 收集散落副本到中心库
+    ///
+    /// 只处理「中心库没有」和「内容完全相同」两类。冲突的必须逐条处置，
+    /// 用 `skills apply`。
     Collect {
         /// 真正执行，不加则只预览
         #[arg(long)]
         apply: bool,
+    },
+
+    /// 对一条散落 skill 执行选定处置
+    ///
+    /// 和 `collect` 的区别：`collect` 按关系批量套固定策略，这个由调用方
+    /// 逐条指定动作。每条都会重新校验现场，不信任先前 `scan` 的结果。
+    Apply {
+        /// skill 名。与 `--path` 二选一
+        name: Option<String>,
+
+        /// 散落副本的完整路径。`scan --json` 输出的 `path` 字段
+        #[arg(long)]
+        path: Option<String>,
+
+        /// 处置动作：
+        /// import（移入中心库）/ dedupe（删副本改链接）/
+        /// take-orphan（采用散落版）/ take-shared（采用中心库版）/
+        /// delete（只删不建链接）/ remove-link（删坏链接）
+        #[arg(long)]
+        action: Option<String>,
+
+        /// 列出每条散落 skill 可用的动作，不执行任何操作
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// 给 skill 打标签
@@ -170,7 +212,8 @@ pub enum ClaudeCmd {
 
 /// MCP server 统一管理子命令。
 #[derive(Debug, Subcommand)]
-pub enum McpCmd {    /// 列出母版里的 MCP server
+pub enum McpCmd {
+    /// 列出母版里的 MCP server
     List,
 
     /// 对比母版与各 agent 现状，不写盘
@@ -183,13 +226,138 @@ pub enum McpCmd {    /// 列出母版里的 MCP server
         dry_run: bool,
     },
 
+    /// 在母版里新增或更新一条 MCP server
+    ///
+    /// `--env` / `--header` 传完整键值对；更新时只覆盖显式给出的项。
+    /// 想清空 env 用 `--clear-env`（单独一个开关，避免「不传」和「传空」
+    /// 两种语义混在一起）。
+    Add {
+        /// server 标识，也是各 agent 配置里的键名
+        id: String,
+        /// 展示名。省略则用 id
+        #[arg(long)]
+        name: Option<String>,
+        /// 传输方式：stdio / sse / http。省略按 stdio
+        #[arg(long)]
+        transport: Option<String>,
+        /// stdio 的可执行文件
+        #[arg(long)]
+        command: Option<String>,
+        /// stdio 的命令行参数，逗号分隔。
+        ///
+        /// 允许以 `-` 开头（`npx -y pkg` 这种），否则 clap 会把它当成
+        /// 自己的参数报 unexpected argument
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// stdio 的工作目录
+        #[arg(long)]
+        cwd: Option<String>,
+        /// sse / http 的端点地址
+        #[arg(long)]
+        url: Option<String>,
+        /// 环境变量，可重复。格式 `KEY=VALUE`（值里可以有 `=`）
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        /// 请求头，可重复。格式 `KEY=VALUE`
+        #[arg(long = "header", value_name = "KEY: VALUE")]
+        headers: Vec<String>,
+        /// 停用这个 server
+        #[arg(long)]
+        disabled: bool,
+        /// 分配给哪些 agent，逗号分隔。省略表示保持原值（新增时为空）
+        #[arg(long, value_delimiter = ',')]
+        agents: Vec<String>,
+        /// 备注
+        #[arg(long)]
+        note: Option<String>,
+        /// 清空全部环境变量
+        #[arg(long)]
+        clear_env: bool,
+        /// 清空全部请求头
+        #[arg(long)]
+        clear_headers: bool,
+    },
+
+    /// 从母版里删除一条 MCP server
+    ///
+    /// 只删母版。已注入到各 agent 的条目要再跑一次 `mcp sync` 才会清理。
+    Remove {
+        /// server 标识
+        id: String,
+    },
+
+    /// 整行设置某条 server 的分配列表（省略 --agents 表示清空）
+    Assign {
+        /// server 标识
+        id: String,
+        /// agent 名，逗号分隔
+        #[arg(long, value_delimiter = ',')]
+        agents: Vec<String>,
+    },
+
+    /// 显示分配矩阵：每条 server 分配给哪些 agent
+    Matrix,
+
+    /// 从各 agent 现有配置导入 server 到母版
+    Import,
+
     /// 生成示例母版
     Example,
 }
 
+/// 母版指令文件的读写。
+///
+/// 母版是 `~/.agents/AGENTS.md`（路径可在 agentcenter.toml 的
+/// `[source].instructions` 改）。写它只改这一份文件，各 agent 的
+/// 指令文件是它的链接或副本，要再跑 `sync` 才同步出去。
+#[derive(Debug, Subcommand)]
+pub enum DocCmd {
+    /// 输出母版内容
+    Read,
+
+    /// 覆盖写入母版内容。内容从 --file 或标准输入读
+    Write {
+        /// 从文件读取内容。省略则读标准输入
+        #[arg(long)]
+        file: Option<String>,
+    },
+
+    /// 只在母版不存在时创建（已存在则拒绝，不覆盖）
+    Create {
+        /// 从文件读取内容。省略则读标准输入
+        #[arg(long)]
+        file: Option<String>,
+    },
+
+    /// 显示母版路径和是否存在
+    Path,
+}
+
+/// Claude 本地协议转换端口的控制。
+///
+/// 上游不是 Anthropic 协议时，注入器会把 `ANTHROPIC_BASE_URL` 指向
+/// `http://127.0.0.1:15722`，由本地转换层把 `/v1/messages` 翻成上游协议。
+/// 这个端口原本只在图形界面启动时起，CLI 改完 Claude 配置后 Claude Code
+/// 会连不上。这一组命令让 CLI 也能把它拉起来。
+#[derive(Debug, Subcommand)]
+pub enum BridgeCmd {
+    /// 查看转换端口在不在听、配置指向哪里
+    Status,
+
+    /// 前台运行转换端口。Ctrl+C 结束
+    Run,
+
+    /// 后台启动一个脱离当前终端的转换进程
+    Start,
+
+    /// 停掉后台启动的转换进程
+    Stop,
+}
+
 /// provider 统一管理子命令。
 #[derive(Debug, Subcommand)]
-pub enum ProvidersCmd {    /// 列出母版里定义的 provider
+pub enum ProvidersCmd {
+    /// 列出母版里定义的 provider
     List,
 
     /// 对比母版与各 agent 现状，不写盘

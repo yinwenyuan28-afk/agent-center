@@ -39,6 +39,9 @@ fn main() {
             // 继承来的句柄（终端 / 重定向文件 / 管道）会原样保留；
             // 没有的话再附加父控制台。见 console.rs 顶部的实测表。
             agentcenter_lib::console::ensure_output_channel();
+            // --json 是全局参数，执行函数拿不到 Cli 结构，
+            // 所以在这里写进线程局部变量
+            agentcenter_lib::cli_run::set_json_mode(cli.json);
             let code = agentcenter_lib::cli_run::run(cmd);
             std::process::exit(code);
         }

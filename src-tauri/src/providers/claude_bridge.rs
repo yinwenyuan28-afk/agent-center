@@ -77,6 +77,228 @@ pub fn ensure_started() {
     });
 }
 
+/// 端口上现在有没有东西在听。
+///
+/// 用「连一下看能不能建立 TCP 连接」判断，比查端口占用表简单。
+/// 只回答「有没有人在听」，不区分是谁 —— 那个交给 [is_our_bridge]。
+pub fn port_in_use() -> bool {
+    use std::net::SocketAddr;
+    let addr: SocketAddr = ([127, 0, 0, 1], BRIDGE_PORT).into();
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
+}
+
+/// 端口上听的是不是本工具的转换层。
+///
+/// 请求 `GET /health` 看返回的 `service` 字段。这样能区分：
+/// - 我们的转换层在听（可能是 GUI 进程起的，也可能是 `bridge start` 起的）
+/// - 端口被别的程序占了
+///
+/// 两种情况的处置完全不同：前者什么都不用做，后者要让用户先查清占用者。
+pub fn is_our_bridge() -> bool {
+    use std::io::{Read, Write};
+    use std::net::SocketAddr;
+
+    let addr: SocketAddr = ([127, 0, 0, 1], BRIDGE_PORT).into();
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500))
+    else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(800)));
+
+    if stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+
+    let mut buf = [0u8; 512];
+    let mut got = Vec::new();
+    // 读到够判断就停：响应体很短，通常一次就够
+    while got.len() < 400 {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&got);
+    // 新版本：/health 直接报出服务名。
+    // 旧版本（没有 /health）：对任何非 POST /v1/messages 都回 404 + 固定错误体。
+    // 两种情况都是「我们的转换层在听」，只是新旧版本差异 —— 不认旧版会
+    // 让升级过渡期把用户自己的转换层误报成「被其它程序占用」。
+    text.contains("agentcenter-claude-bridge") || text.contains("只接受 POST /v1/messages")
+}
+
+/// 后台运行进程的 pid 记录文件。
+///
+/// `bridge start` 启动的子进程会把 pid 写在这里，`bridge stop` 读它来杀。
+/// 放在 `~/.agents/` 而不是临时目录，这样重启后仍能停掉上一个进程。
+pub fn pidfile_path() -> PathBuf {
+    super::store::home_dir()
+        .join(".agents")
+        .join("claude-bridge.pid")
+}
+
+/// 转换层的当前状态，供 `bridge status` 用。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeStatus {
+    /// 端口号
+    pub port: u16,
+    /// 端口上有没有进程在听
+    pub listening: bool,
+    /// 在听的是不是本工具的转换层（`GET /health` 认出来的）
+    pub ours: bool,
+    /// 转换配置文件的路径
+    pub config_path: String,
+    /// 转换配置是否存在
+    pub configured: bool,
+    /// 上游地址，未配置时为空
+    pub upstream: String,
+    /// 上游协议，未配置时为空
+    pub kind: String,
+    /// 后台进程的 pid，没有后台进程时为 None
+    pub pid: Option<u32>,
+}
+
+/// 读当前状态。不启动任何东西。
+pub fn status_report() -> BridgeStatus {
+    let listening = port_in_use();
+    let ours = listening && is_our_bridge();
+    let (configured, upstream, kind) = match read_bridge_file() {
+        Ok(f) => (true, f.upstream, f.kind),
+        Err(_) => (false, String::new(), String::new()),
+    };
+
+    BridgeStatus {
+        port: BRIDGE_PORT,
+        listening,
+        ours,
+        config_path: crate::config::contract_tilde(&config_path()),
+        configured,
+        upstream,
+        kind,
+        pid: read_pid(),
+    }
+}
+
+/// 前台阻塞运行，直到进程被结束。
+///
+/// `bridge run` 用这个。端口被占时返回错误而不是静默退出 ——
+/// 用户明确要求运行，静默退出会让人以为起来了。
+pub fn run_blocking() -> anyhow::Result<()> {
+    serve().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            anyhow::anyhow!(
+                "端口 {BRIDGE_PORT} 已被占用。可能已有一个转换进程在跑，用 `agentcenter bridge status` 查看"
+            )
+        } else {
+            anyhow::anyhow!("监听 {BRIDGE_PORT} 失败：{e}")
+        }
+    })
+}
+
+/// 读 pidfile，校验那个进程还活着。
+///
+/// pid 会被系统复用，所以不能只看「进程存不存在」，还要确认它确实是
+/// agentcenter —— 否则可能误杀一个凑巧复用同号的其他程序。
+pub fn read_pid() -> Option<u32> {
+    let text = std::fs::read_to_string(pidfile_path()).ok()?;
+    let pid: u32 = text.trim().parse().ok()?;
+    if process_is_agentcenter(pid) {
+        Some(pid)
+    } else {
+        // pid 已失效或已被别的程序复用，清掉陈旧记录
+        let _ = std::fs::remove_file(pidfile_path());
+        None
+    }
+}
+
+/// 判断某个 pid 是不是还在跑的 agentcenter 进程。
+fn process_is_agentcenter(pid: u32) -> bool {
+    let filter = format!("PID eq {pid}");
+    let Ok(out) = crate::proc::output("tasklist", &["/FI", &filter, "/NH", "/FO", "CSV"], None)
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    text.contains("agentcenter")
+}
+
+/// 后台启动一个 `agentcenter bridge run`。
+///
+/// 返回新进程的 pid。已经在听时直接返回现有 pid（或 0 表示有人在听
+/// 但不是我们起的），不重复启动。
+pub fn start_detached() -> anyhow::Result<u32> {
+    if port_in_use() {
+        if is_our_bridge() {
+            // 已经有一个本工具的转换层在听（很可能是图形界面进程起的），
+            // 不需要再起一个
+            if let Some(pid) = read_pid() {
+                return Ok(pid);
+            }
+            anyhow::bail!(
+                "端口 {BRIDGE_PORT} 上已经有一个 agentcenter 转换层在听（可能是图形界面进程起的），不需要再启动"
+            );
+        }
+        anyhow::bail!(
+            "端口 {BRIDGE_PORT} 已被其它程序占用。用 `netstat -ano | findstr 15722` 查出 pid 后处理"
+        );
+    }
+
+    let exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("拿不到自身路径，无法后台启动：{e}"))?;
+
+    let mut cmd = crate::proc::new(&exe.to_string_lossy());
+    cmd.arg("bridge").arg("run");
+    // 脱离当前终端：不继承标准输入输出，否则调用方退出时管道断开，
+    // 子进程写日志会失败。输出直接丢弃，日志靠 bridge status 看
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("启动转换进程失败：{e}"))?;
+    let pid = child.id();
+
+    // 等一下确认它真的起来了。转换层是 bind 之后立刻可连，
+    // 300ms 足够；等不到就报错，不假装成功
+    let addr: std::net::SocketAddr = ([127, 0, 0, 1], BRIDGE_PORT).into();
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(100));
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+            let _ = std::fs::write(pidfile_path(), pid.to_string());
+            return Ok(pid);
+        }
+    }
+
+    anyhow::bail!("转换进程已启动（pid {pid}）但端口 {BRIDGE_PORT} 没听上，请用 `bridge run` 前台排查")
+}
+
+/// 停掉后台启动的进程。
+///
+/// 返回被停掉的 pid。没有后台进程时返回 None。
+pub fn stop_detached() -> anyhow::Result<Option<u32>> {
+    let Some(pid) = read_pid() else {
+        return Ok(None);
+    };
+
+    let status = crate::proc::status("taskkill", &["/PID", &pid.to_string(), "/F"], None)
+        .map_err(|e| anyhow::anyhow!("执行 taskkill 失败：{e}"))?;
+    let _ = std::fs::remove_file(pidfile_path());
+
+    if status.success() {
+        Ok(Some(pid))
+    } else {
+        // 进程可能刚好自己退了，pidfile 已清掉，当作已停
+        Ok(Some(pid))
+    }
+}
+
+
 fn serve() -> std::io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", BRIDGE_PORT))?;
     for conn in listener.incoming() {
@@ -100,6 +322,19 @@ fn handle_conn(mut stream: TcpStream) -> std::io::Result<()> {
     let Some(req) = read_request(&mut stream)? else {
         return Ok(());
     };
+
+    // 标识端点。只用来回答「这个端口上是不是我们的转换层」——
+    // `bridge start` 靠它区分「已经有一个 agentcenter 在跑」和
+    // 「端口被别的程序占了」，两种情况的处置完全不同。
+    // 不带任何上游信息，被本机其他程序探测到也没有危害。
+    if req.method == "GET" && req.path.split('?').next() == Some("/health") {
+        return write_json(
+            &mut stream,
+            200,
+            &json!({"service": "agentcenter-claude-bridge", "port": BRIDGE_PORT}),
+        );
+    }
+
     if req.method != "POST" || !is_messages_path(&req.path) {
         return write_json(
             &mut stream,

@@ -279,3 +279,47 @@ pub fn provider_capable() -> Vec<Box<dyn Agent>> {
 pub fn mcp_capable() -> Vec<Box<dyn Agent>> {
     all().into_iter().filter(|a| a.supports_mcp()).collect()
 }
+
+/// 每个 agent 的可执行文件名（用于判断它是否正在运行）。
+///
+/// 只收录**确认会覆盖配置文件**的那些。ZCode / Pi / opencode 运行时会把
+/// 内存状态写回磁盘，同步前不退出就会被冲掉 —— 这是实测过的问题。
+///
+/// 名字按 Windows 的进程名写。macOS / Linux 上进程名可能不带 `.exe`，
+/// 所以 [running_agents] 做的是「包含」匹配而不是全等。
+const PROCESS_NAMES: &[(&str, &str)] = &[
+    ("claude", "claude.exe"),
+    ("codex", "codex.exe"),
+    ("zcode", "zcode.exe"),
+    ("pi", "pi.exe"),
+    ("opencode", "opencode.exe"),
+    ("cursor", "cursor.exe"),
+    ("qoder", "qoder.exe"),
+    ("workbuddy", "workbuddy.exe"),
+    ("dsh", "dsh.exe"),
+    ("hermes", "hermes.exe"),
+];
+
+/// 当前正在运行的、会覆盖配置的 agent id 列表。
+///
+/// 用一次 `tasklist` 拿全部进程再在内存里比对，而不是每个 agent 查一次 ——
+/// tasklist 单次调用约 100 ms，十个 agent 查十次就是 1 秒。
+///
+/// 非 Windows 平台返回空列表：这个工具当前只支持 Windows（README 里写明）。
+pub fn running_agents() -> Vec<String> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+
+    let Ok(out) = crate::proc::output("tasklist", &["/NH", "/FO", "CSV"], None) else {
+        // 查不到进程列表不该让同步失败 —— 这只是个提醒
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+
+    PROCESS_NAMES
+        .iter()
+        .filter(|(_, exe)| text.contains(exe))
+        .map(|(id, _)| id.to_string())
+        .collect()
+}
