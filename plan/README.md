@@ -168,8 +168,59 @@ qoder / codebuddy / workbuddy 没有单一指令文件（workbuddy 是 SOUL/IDEN
 | 同名但内容不同 | **不动**，列进冲突表交用户决定 |
 | 目录是坏的链接 | 只报告，不自动删 |
 
-批量按上表处理（「一键收集」），也可以点「扫描散落 skill」逐条选：移入 / 删副本改链接 /
+批量按上表处理（「一键收集」），也可以点「扫描散落 skill」逐条选：移入 / 标记专用 / 删副本改链接 /
 采用散落版 / 采用中心库版 / 删除 / 删除坏链接。详见「2026-11-12 映射取消 + 散落 skill 逐条处置」。
+
+### 指令文档的通用 + 专用片段（2026-11-18）
+
+原来 `~/.agents/AGENTS.md` 是唯一一份母版，`source_path()` 是单值，所有 agent 原样链接它。
+但「子代理用 cheap 模型省开销」这类规则只对个别 agent 成立，全塞进母版会污染其余 9 个。
+
+| 文件 | 作用 |
+|---|---|
+| `~/.agents/AGENTS.md` | 通用片段，所有 agent 都读 |
+| `~/.agents/AGENTS.d/<agent>.md` | 某个 agent 的专用补充，存在才算数 |
+| `~/.agents/composed/<agent>.md` | 两者合成的派生物 |
+
+规则：**有专用片段 → 链接合成产物；没有 → 仍直接链接通用母版。** 这条是为了零迁移 ——
+升级不改变任何已有链接，只有真的写了专用内容才多一层。
+
+实现要点：
+
+- `config::resolved_mappings()` 的 `source` 改为 `doc::effective_source(agent)`，这是唯一动到既有语义的地方
+- `doc::compose_one` 先拼内容再和磁盘比对，一致就跳过（幂等，连 mtime 都不动）
+- **合成必须 `fs::write` 原地写，不能用临时文件 + rename**。硬链接场景下 rename 会产生新 inode，
+  agent 那边仍指向旧 inode，内容改了却读不到。这是本设计最容易踩的坑
+- `sync` 必须先 `compose_all` 再 `sync_one`：后者开头就检查源文件存在
+- GUI（`commands::sync_mappings_inner`）和 CLI（`cli_run::Command::Sync`）两条路径都改了。
+  第一版只改了 GUI，CLI 跑 `sync` 时合成不会发生 —— 隔离环境实测时发现的
+- 合成文件是可再生派生物；片段（用户内容）在覆盖和删除前都走 `link::backup_file_copy`
+
+### 专用 skill（2026-11-18）
+
+有些 skill 只对一个 agent 有意义（本机实例：cursor 的 `issue-scoper`、`utf8-files`）。放进
+`~/.agents/skills` 会让 19 个 agent 都读到，等于给别的 agent 加噪声。
+
+| 类型 | 本体位置 | 谁能读到 |
+|---|---|---|
+| 公共 | `~/.agents/skills/<名字>/` | 所有 agent |
+| 专用 | `~/.agents/skills-mapping-<agent>/<名字>/` | `[[skills.mappings]]` 里列出的 agent |
+
+agent 目录里那一份是指向本体的 junction，agent 读取方式不变，公共库列表里不出现它。
+同一份本体可给多个 agent 用（`agents = ["cursor", "zcode"]`），第一个 agent 决定本体落在哪个专用库。
+
+为什么要有记录而不是靠扫描推断：链接断了（本体被删、agent 重装、目录被挪）时 agent 那边表现为
+「skill 莫名不见」，界面上没有报错。有记录才能逐条检查每个位置、报出断链 / 缺失，并一键重建。
+
+实现要点：
+
+- `skills::private_skills_root(agent)` 给出专用库路径，跟着 `AGENTCENTER_HOME` 走
+- `skills::privatize_one(src, agent)` 搬本体 + 写记录，链接统一交给 `sync_private_links` 建
+  （本体可能来自公共库，那里不能留链接；两种情况共用一份建链接逻辑）
+- `skills::sync_private_links(dry_run)` 幂等重建；本体不存在时只报错不造链接
+- `skills::remove_private(skill, to_shared)` 先删链接、再动本体、最后删记录；`to_shared` 移回公共库，
+  否则先复制进 `~/.agents/backup/` 再删
+- `OrphanAction::Privatize` 只对 `unique` 关系开放；集中库已有同名项时拒绝（那是公共的）
 
 ### 集成 npx skills
 

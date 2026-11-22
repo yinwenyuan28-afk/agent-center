@@ -46,7 +46,7 @@ Claude 只有 anthropic），避免选了却被静默改写。
 | `~/.pi/agent/AGENTS.md`        | reasoning 写法 |
 | `~/.codex/AGENTS.md`           | **空文件**      |
 
-这些内容互不相同，也没有单一真实来源。skills 也一样：`~/.agents/skills` 下 18 个，另外 `.cursor/skills`、`.config/opencode/skills` 里还有散落的副本。
+这些内容互不相同，也没有单一真实来源。skills 也一样：`~/.agents/skills` 下 18 个，另外 `.cursor/skills`、`.config/opencode/skills` 里还有散落的副本。其中一部分只对单个 agent 有意义（如 cursor 的 `issue-scoper`、`utf8-files`），收进公共库会让别的 agent 读到用不上的东西 —— 这类走独立的专用库 + 目录链接，见「Skills 中心库」一节。
 
 API key 更是如此。实测本机 19 条凭证、16 个不同 key，其中 2 组重复：
 CommandCode 那把同时配在 claude / zcode / pi 三处，MiniMax 那把在 zcode / pi 两处。
@@ -118,18 +118,29 @@ agentcenter status                   # 查看各映射健康状态
 agentcenter mappings                 # 列出映射表
 
 agentcenter doc path                 # 母版 AGENTS.md 在哪、在不在
-agentcenter doc read                 # 输出母版内容
+agentcenter doc read                 # 输出通用母版内容
 agentcenter doc write --file x.md    # 覆盖写入（空内容会被拒）
 agentcenter doc create --file x.md   # 只在不存在时创建
+agentcenter doc list                 # 每个 agent 有无专用片段、合成是否最新
+agentcenter doc specific cursor      # 打印 cursor 的专用片段
+agentcenter doc specific cursor --file c.md   # 写入/覆盖 cursor 的专用片段
+agentcenter doc specific cursor --clear       # 取消 cursor 的专用片段
+agentcenter doc compose              # 重建所有合成文档（sync 内部也会先跑）
 agentcenter unmap claude             # 取消某个映射：删链接，并让后续 sync 跳过它
 agentcenter remap claude             # 恢复被取消的映射：立刻重建链接
 
-agentcenter skills list              # 列出中心库的 skill
+agentcenter skills list              # 列出中心库 + 专用 skill（agents 非空即专用）
 agentcenter skills scan              # 扫描散落副本
 agentcenter skills collect           # 预览收集计划
 agentcenter skills collect --apply
 agentcenter skills apply --dry-run                  # 看每条散落 skill 可用哪些动作
 agentcenter skills apply --path <路径> --action dedupe   # 逐条处置
+agentcenter skills apply --path <路径> --action privatize  # 标记为当前 agent 专用
+agentcenter skills private list      # 列出专用 skill 及每条链接状态
+agentcenter skills private add issue-scoper --agent cursor  # 标记专用（可传多个 --agent）
+agentcenter skills private sync      # 重建专用 skill 的链接（幂等）
+agentcenter skills private remove issue-scoper --to-shared  # 取消专用，本体移回公共库
+agentcenter skills private remove issue-scoper              # 取消专用，备份后删除
 agentcenter skills tag ui-design --add UI设计
 agentcenter skills check             # 检查第三方更新
 agentcenter skills update            # 更新全部
@@ -244,6 +255,8 @@ agentcenter providers sync
 
 ```toml
 [source]
+# 通用母版的路径。所有 agent 默认读这一份。
+# 想给某个 agent 加专用补充，不用改这里 —— 写 ~/.agents/AGENTS.d/<agent>.md 即可。
 instructions = "~/.agents/AGENTS.md"
 
 [[mappings]]
@@ -255,6 +268,15 @@ disabled = false        # true 表示用户取消了这条映射，sync 时跳�
 [skills.tags]
 ui-design       = ["前端", "设计"]
 deepseek-search = ["搜索", "联网"]
+
+# 专用 skill 的归属记录：只给 agents 里列出的那几只读，本体在
+# ~/.agents/skills-mapping-<agents[0]>/<skill>。由
+# `agentcenter skills apply --action privatize` 或
+# `agentcenter skills private add` 写入，一般不需要手改。
+[[skills.mappings]]
+skill  = "issue-scoper"
+agents = ["cursor"]
+mode   = "auto"
 
 [usage]
 # 纳入 token 用量统计的 agent。默认空 = 一家都不读。
@@ -395,6 +417,36 @@ Windows 上建符号链接需要管理员权限或开发者模式；批量建 ju
 
 它同时会在 `agentcenter.toml` 里给这个 agent 记 `disabled = true`。不记的话，下一次「同步全部」会立刻把链接建回来，看起来像按钮失灵。恢复用 `agentcenter remap <agent>`。
 
+## 通用文档 + 每个 agent 的专用补充
+
+有些规则只对个别 agent 成立。比如「派子代理时用 `glm-5.3-flash` 省开销」，在 cursor、zcode 上需要，其它 agent 读到只是噪声。全塞进母版会污染别人，放弃统一管理又回到九个文件各写一遍。
+
+所以文档分三层：
+
+```
+~/.agents/AGENTS.md              通用片段，所有 agent 都读
+~/.agents/AGENTS.d/<agent>.md    某个 agent 的专用补充（存在才算数）
+~/.agents/composed/<agent>.md    两者合成的产物
+```
+
+规则只有一条：**有专用片段的 agent 读合成产物，没有的仍直接读通用母版。**
+
+这条规则换来的是零迁移：升级这个工具不会改动任何一个已建好的链接。只有你确实给某个 agent 写了专用内容，它才会从「链接通用母版」变成「链接合成文件」。
+
+合成就是「通用 + 空行 + 专用」，不做标题包装 —— 片段里的标题层级由你控制，工具加标题会和它打架。
+
+**合成文件必须原地写，不能用「写临时文件再改名」。**
+
+`create_link` 对文件按 symlink → hardlink → copy 降级。Windows 上没开开发者模式时多半落到硬链接，此时 `composed/cursor.md` 与 `~/.cursor/AGENTS.md` 是同一个 inode。若合成时用 rename，新文件是新 inode，而 agent 那边的硬链接还指着旧 inode —— 内容改了，agent 永远读到旧的。
+
+代价是崩溃时可能留下半截文件。这个取舍成立：合成文件随时能重建，真正的用户内容（片段）在覆盖和删除前都会备份进 `~/.agents/backup/`。
+
+**`sync` 会先合成再建链接。** `link::sync_one` 开头就检查源文件是否存在，所以合成必须排在前面。GUI 的 `sync_mappings` 和 CLI 的 `sync` 两条路径都是这个顺序。
+
+**合成是幂等的。** 拼出来的内容和磁盘上一致就跳过，连 mtime 都不动 —— 连跑两次 `sync`，第二次是真正的零改动。
+
+界面上在「AGENTS文档映射」页顶部：通用片段和每个 agent 一个选项卡，有专用内容的标 ✎，合成落后的标 •，顶部统一给「生成并同步」按钮。
+
 ## 几个刻意的设计决定
 
 **API key 体检是只读的，不写入。**
@@ -413,7 +465,7 @@ Windows 上建符号链接需要管理员权限或开发者模式；批量建 ju
 
 | 关系      | 可选动作                          |
 | ------- | ----------------------------- |
-| 中心库没有   | 移入中心库 / 删除                    |
+| 中心库没有   | 移入中心库 / 标记为当前 agent 专用 / 删除   |
 | 内容相同    | 删副本改链接 / 删除                   |
 | 同名不同内容  | 采用散落版 / 采用中心库版 / 删除           |
 | 坏链接     | 删除坏链接                         |
@@ -421,6 +473,33 @@ Windows 上建符号链接需要管理员权限或开发者模式；批量建 ju
 「一键收集」只处理前两类 —— 冲突必须由人决定采用哪一份，工具替用户选风险太大。每个动作执行前弹确认框写清后果，执行时再重新校验一次现场（对话框开着的时候文件完全可能被改过），不信任界面上拿着的旧扫描结果。
 
 采用散落版覆盖中心库时，中心库那一份会先复制进 `~/.agents/backup/`。**唯一不进备份的是「删除」** —— 那是用户明确要求的真删除，确认框里写明了。
+
+**专有性靠独立存放区 + 目录链接，公共库保持纯净。**
+有些 skill 只对一个 agent 有意义（本机实例：cursor 的 `issue-scoper`、`utf8-files`）。把它们放进 `~/.agents/skills` 会让 19 个 agent 都读到，等于给别的 agent 加噪声。
+
+所以这两类 skill 分开放：
+
+| 类型 | 本体位置 | 谁能读到 |
+| --- | --- | --- |
+| 公共 | `~/.agents/skills/<名字>/` | 所有 agent |
+| 专用 | `~/.agents/skills-mapping-<agent>/<名字>/` | 只有记录里的那几个 agent |
+
+agent 目录里的那一份（如 `~/.cursor/skills/issue-scoper`）是一个指向本体的 junction，所以 agent 读取方式完全不变，而公共库列表里不会出现它。
+
+同一份本体可以给多个 agent 用：`agents = ["cursor", "zcode"]` 时两处链接都指向 `skills-mapping-cursor` 那一份，不重复占空间。第一个 agent 决定本体落在哪个专用库目录。
+
+归属记录写在 `~/.agents/agentcenter.toml`：
+
+```toml
+[[skills.mappings]]
+skill = "issue-scoper"
+agents = ["cursor"]
+mode  = "auto"
+```
+
+**为什么要记录，而不是靠扫描推断。** 链接断了（本体被删、agent 重装、目录被挪）时，agent 那边表现为「skill 莫名其妙不见了」，界面上也不会报错 —— 那只眼睛在 agent 自己身上。有记录才能逐条检查每个位置、报出「断链 / 缺失」，并一键重建。`skills private sync` 是幂等的：已经是对的链接直接跳过。
+
+**取消专用有两条路，都会先删链接再动本体。** `--to-shared` 把本体移回公共库，之后所有 agent 都能用；不带这个参数则先复制进 `~/.agents/backup/<时间戳>/` 再删。顺序是先磁盘后配置，和 `unmap` 一致 —— 反过来会出现「记录没了但链接还在」，而且删链接失败时用户还能重试。
 
 **git 只给命令，绝不自动提交。**
 `git commit` 逐个 `git add <路径>`，代码里没有 `git add -A`，也会拒绝仓库外的路径。界面上必须勾选路径才能提交。
@@ -505,7 +584,7 @@ agentcenter/
 │   │   ├── config.rs             agentcenter.toml 读写
 │   │   ├── link.rs               链接引擎（降级链、健康检查、备份）
 │   │   ├── doc.rs                AGENTS.md 母版的读取与写入
-│   │   ├── skills.rs             skill 收集、去重、标签、单条处置
+│   │   ├── skills.rs             skill 收集、去重、标签、单条处置、专用库与链接
 │   │   ├── skillscli.rs          npx skills 封装（含 ANSI 清理）
 │   │   ├── credentials.rs        API key 只读体检（遍历 agents 聚合）
 │   │   ├── git.rs                git 封装（按路径提交）

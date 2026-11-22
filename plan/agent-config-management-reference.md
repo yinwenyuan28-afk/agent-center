@@ -65,7 +65,20 @@ provider 可注入 = 13 个（`agents::provider_capable()`）。MCP 可注入 = 
 
 ### 3.1 机制
 
-母版只有一份：`~/.agents/AGENTS.md`（路径可在 `~/.agents/agentcenter.toml` 的 `[source].instructions` 改）。其它 agent 的指令文件是它的**链接或副本**。
+指令文档分三层，通用内容写一份，需要区别对待的 agent 再补一份：
+
+```
+~/.agents/AGENTS.md              通用片段（路径可在 [source].instructions 改）
+~/.agents/AGENTS.d/<agent>.md    某个 agent 的专用补充，存在才算数
+~/.agents/composed/<agent>.md    两者合成的产物
+```
+
+其它 agent 的指令文件是**链接或副本**：
+
+- 有专用片段的 agent → 指向 `composed/<agent>.md`
+- 没有专用片段的 agent → 仍直接指向 `AGENTS.md`
+
+后一条是刻意设计的：升级工具不会改动任何已有链接，只有真的写了专用内容才多一层合成。合成内容 = 通用 + 空行 + 专用。
 
 `link.rs` 的降级链：
 
@@ -79,8 +92,13 @@ Windows 上建符号链接需要管理员权限或开启开发者模式，所以
 三条安全边界：
 
 - 建链接前，已存在的真实文件先移到 `~/.agents/backup/<时间戳>/`，不删除、不覆盖。内容与母版不同时会额外提示合并。
-- 副本模式靠 `.agentcenter-manifest.json` 里的 SHA-256 判断是否被改过；`status` 报 `ok` / `drifted` / `broken` 三态。
+- 副本模式按内容 SHA-256 现算比对；`status` 报 `ok` / `drifted` / `broken` 三态。
 - 取消映射（`unmap`）不只删链接，还写 `disabled = true`。否则下一次 `sync` 立刻建回来。
+
+合成相关的两条额外约束：
+
+- **合成产物必须原地 `fs::write`，不能用临时文件 + rename**。硬链接场景下 rename 会产生新 inode，agent 侧仍指向旧 inode，改了读不到。
+- **`sync` 先 `compose_all` 再 `sync_one`**，因为后者开头就检查源文件存在。GUI 和 CLI 两条路径都要遵守。
 
 ### 3.2 每个 agent 的指令文件路径
 
@@ -112,27 +130,31 @@ Windows 上建符号链接需要管理员权限或开启开发者模式，所以
 
 `skills.rs` 只扫已安装 agent 的 `skills_dir()`，用来找散落在各处的 skill 副本。**即使某个 agent 原生读 `~/.agents/skills`，它自己的目录也要扫** —— Cursor 和 OpenCode 都属于这种，它们各自的 `skills/` 里常还有单独装的。
 
-| agent | skills 目录 | 原生读 `~/.agents/skills` |
-|---|---|---|
-| claude | `~/.claude/skills` | 否，需挂链接 |
-| codex | `~/.codex/skills` | 是 |
-| zcode | `~/.zcode/skills` | 否 |
-| pi | `~/.pi/agent/skills` | 是 |
-| opencode | `~/.config/opencode/skills` | 是 |
-| cursor | `~/.cursor/skills` | 是 |
-| workbuddy | `~/.workbuddy/skills` | 否 |
-| dsh | `~/.dsh/skills` | 否 |
-| hermes | `$HERMES_HOME/skills` | 否 |
-| qoder | `~/.qoder/skills` | 未核实 |
-| qoder-cn | `~/.qoder-cn/skills` | 未核实 |
-| codebuddy | `~/.codebuddy/skills` | 未核实 |
-| trae-cn | `~/.trae-cn/skills` | 未核实 |
-| zed | `%APPDATA%\Zed\skills` | 未核实 |
-| gemini | `~/.gemini/skills` | 未核实 |
-| grok | `~/.grok/skills` | 未核实 |
-| openclaw | `~/.openclaw/skills` | 未核实 |
-| kimi | `~/.kimi-code/skills` | 未核实 |
-| minimax | `~/.minimax/skills` | 未核实 |
+只对单个 agent 有意义的 skill 不放公共库，走专用库 `~/.agents/skills-mapping-<agent>/`，agent 目录里留一个指向它的链接。归属记录在 `agentcenter.toml` 的 `[[skills.mappings]]`，见 README「Skills 中心库」。
+
+| agent | skills 目录 | 原生读 `~/.agents/skills` | 专用库目录 |
+|---|---|---|---|
+| claude | `~/.claude/skills` | 否，需挂链接 | `~/.agents/skills-mapping-claude` |
+| codex | `~/.codex/skills` | 是 | `~/.agents/skills-mapping-codex` |
+| zcode | `~/.zcode/skills` | 否 | `~/.agents/skills-mapping-zcode` |
+| pi | `~/.pi/agent/skills` | 是 | `~/.agents/skills-mapping-pi` |
+| opencode | `~/.config/opencode/skills` | 是 | `~/.agents/skills-mapping-opencode` |
+| cursor | `~/.cursor/skills` | 是 | `~/.agents/skills-mapping-cursor` |
+| workbuddy | `~/.workbuddy/skills` | 否 | `~/.agents/skills-mapping-workbuddy` |
+| dsh | `~/.dsh/skills` | 否 | `~/.agents/skills-mapping-dsh` |
+| hermes | `$HERMES_HOME/skills` | 否 | `~/.agents/skills-mapping-hermes` |
+| qoder | `~/.qoder/skills` | 未核实 | `~/.agents/skills-mapping-qoder` |
+| qoder-cn | `~/.qoder-cn/skills` | 未核实 | `~/.agents/skills-mapping-qoder-cn` |
+| codebuddy | `~/.codebuddy/skills` | 未核实 | `~/.agents/skills-mapping-codebuddy` |
+| trae-cn | `~/.trae-cn/skills` | 未核实 | `~/.agents/skills-mapping-trae-cn` |
+| zed | `%APPDATA%\Zed\skills` | 未核实 | `~/.agents/skills-mapping-zed` |
+| gemini | `~/.gemini/skills` | 未核实 | `~/.agents/skills-mapping-gemini` |
+| grok | `~/.grok/skills` | 未核实 | `~/.agents/skills-mapping-grok` |
+| openclaw | `~/.openclaw/skills` | 未核实 | `~/.agents/skills-mapping-openclaw` |
+| kimi | `~/.kimi-code/skills` | 未核实 | `~/.agents/skills-mapping-kimi` |
+| minimax | `~/.minimax/skills` | 未核实 | `~/.agents/skills-mapping-minimax` |
+
+专用库目录名由 `skills::private_skills_root(agent)` 生成，跟着 `AGENTCENTER_HOME` 走。
 
 ---
 
@@ -356,11 +378,16 @@ API_KEY = "..."
 | 命令 | 参数 | 作用 | 写盘 |
 |---|---|---|---|
 | `doc path` | | 母版路径、是否存在、字节数 | 否 |
-| `doc read` | | 输出母版内容（原样，不加装饰） | 否 |
+| `doc read` | | 输出通用母版内容（原样，不加装饰） | 否 |
 | `doc write` | `--file <路径>`（省略读标准输入） | 覆盖写入。内容为空会被拒绝 | 是 |
 | `doc create` | `--file <路径>`（省略读标准输入） | 只在不存在时创建，已存在则拒绝 | 是 |
+| `doc list` | | 每个 agent 有无专用片段、合成是否最新、最终字节数 | 否 |
+| `doc specific <agent>` | `--file <路径>` / `--clear` | 不带参数打印专用片段；带 `--file` 写入；`--clear` 取消专用 | 是 |
+| `doc compose` | `--dry-run` | 重建所有合成文档。`sync` 内部也会先跑一遍 | 是 |
 
 **写母版只改这一份文件**，各 agent 的指令文件是链接或副本，要再跑 `sync` 才同步出去。`doc write` 拒绝空内容是有意的：脚本里管道接错时会把母版清空。
+
+`doc specific` 相反 —— **允许写空内容**，那是"取消这个 agent 的专用片段"的语义。专用片段不是唯一真实来源，清空它只是让该 agent 回到读通用母版；写之前旧版会备份进 `~/.agents/backup/`。
 
 ### 6.3 provider
 
@@ -420,21 +447,26 @@ Cursor 专项：
 
 | 命令 | 参数 | 作用 | 写盘 |
 |---|---|---|---|
-| `skills list` | | 列出中心库 `~/.agents/skills` 里的 skill | 否 |
+| `skills list` | | 列出中心库 `~/.agents/skills` 里的 skill，含专用项（`agents` 非空） | 否 |
 | `skills scan` | | 扫描各 agent 目录里散落的 skill，按 unique / identical / CONFLICT / broken 分类 | 否 |
 | `skills collect` | `--apply` | 收集散落副本；不加 `--apply` 只预览。只处理 unique 和 identical，冲突不动 | 是 |
 | `skills apply` | `<name>` 或 `--path <路径>；`--action <动作>`；`--dry-run` | 对**一条**散落 skill 执行选定处置。`--dry-run` 只列出每条可用哪些动作 | 是 |
+| `skills private list` | | 列出专用 skill 记录及每条链接的现场状态（正常 / 断链 / 缺失） | 否 |
+| `skills private add <skill>` | `--agent <id>`（可重复） | 标记为专用：本体搬进 `skills-mapping-<agents[0]>`，各 agent 目录建链接 | 是 |
+| `skills private sync` | `--dry-run` | 幂等重建专用链接。本体不存在时只报错，不造悬空链接 | 是 |
+| `skills private remove <skill>` | `--to-shared` | 取消专用：删链接、移回公共库（或备份后删）、删记录 | 是 |
 | `skills tag <name>` | `--add a,b`（传空串 = 清空） | 给 skill 打标签，标签存在 `agentcenter.toml` 里 | 是 |
 | `skills check` | | 调 `npx skills` 检查第三方更新，退出码 1 = 有更新 | 否 |
 | `skills update [names...]` | | 调 `npx skills` 更新，不传名字则全部 | 是 |
 
 标签为什么不写进 skill 目录：那会让 `npx skills update` 报冲突。为什么不做成子目录：ZCode 只扫 `<skills>/<名字>/SKILL.md` 两层，加一级分类就读不到。
 
-#### skills apply 的六个动作
+#### skills apply 的七个动作
 
 | 动作 | 做什么 | 适用的关系 |
 |---|---|---|
 | `import` | 移入中心库，原位置建链接指回来 | unique / conflict |
+| `privatize` | 移进 `~/.agents/skills-mapping-<agent>`，原位置建链接，写归属记录；**不进公共库** | unique |
 | `dedupe` | 删散落副本，原位置改建链接指向中心库 | identical / conflict |
 | `take-orphan` | 采用散落版：备份中心库那份，把散落这份搬进去，原位置建链接 | unique / conflict |
 | `take-shared` | 采用中心库版：删散落副本，原位置建链接 | identical / conflict |
