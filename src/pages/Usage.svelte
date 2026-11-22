@@ -25,6 +25,7 @@
   import PageHead from '../lib/components/PageHead.svelte';
   import Button from '../lib/components/Button.svelte';
   import Badge from '../lib/components/Badge.svelte';
+  import Tip from '../lib/components/Tip.svelte';
   import Switch from '../lib/components/Switch.svelte';
   import UsageTrend from '../lib/components/UsageTrend.svelte';
   import UsageShare from '../lib/components/UsageShare.svelte';
@@ -161,9 +162,12 @@
 </script>
 
 <PageHead title="Token 用量">
-  从各 agent 自己写的会话文件里读用量，不额外记账。数据源动辄上 GB，所以默认一家都不读——
-  在页面底部的「纳入统计的 agent」里勾选才开始统计。各家的原始口径不同（有的 input 含缓存、
-  有的不含），这里已统一折算成「输入含缓存」，可以直接横向比较。
+  从各 agent 自己写的会话文件里读用量，不额外记账。
+  <Tip label="统计口径与默认行为" class="mt-1">
+    数据源动辄上 GB，所以默认一家都不读，在页面底部的「纳入统计的 agent」里勾选才开始统计。
+    各家的原始口径不同（有的 input 含缓存、有的不含），这里已统一折算成「输入含缓存」，
+    可以直接横向比较。
+  </Tip>
 </PageHead>
 
 <!-- 时间窗 -->
@@ -376,10 +380,10 @@
     {/if}
   </div>
 
-  <p class="mt-3 text-[11px] leading-relaxed text-[var(--color-text-faint)]">
-    说明：只统计真正消耗 token 的模型调用。请求失败或空回包（全 0 token）的记录已排除，否则调用次数会虚高。
+  <Tip label="统计规则" class="mt-3">
+    只统计真正消耗 token 的模型调用。请求失败或空回包（全 0 token）的记录已排除，否则调用次数会虚高。
     时间按本机时区切日。
-  </p>
+  </Tip>
 {/if}
 
 <!-- 统计开关面板。放在最底部并默认收起——日常看数字，改配置是偶发动作 -->

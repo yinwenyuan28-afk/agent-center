@@ -36,6 +36,7 @@
   import PageHead from '../lib/components/PageHead.svelte';
   import Button from '../lib/components/Button.svelte';
   import Badge from '../lib/components/Badge.svelte';
+  import Tip from '../lib/components/Tip.svelte';
   import Log from '../lib/components/Log.svelte';
 
   let matrix = $state<McpMatrix | null>(null);
@@ -278,13 +279,10 @@
 </script>
 
 <PageHead title="MCP">
-  所有 MCP server 在一个池子里。点某一行的
-  <strong class="font-medium text-[var(--color-text)]">「分配」</strong>
-  展开，选择这个 server 要用在哪些 agent 上。
-  <br />
-  <span class="text-[var(--color-text-muted)]">
+  所有 MCP server 放在一个池子里，点某一行的「分配」选择它要用在哪些 agent 上。
+  <Tip label="改动什么时候生效" class="mt-1">
     改动先写母版，点「应用到各 agent」才真正写入配置文件。取消勾选的会从该 agent 里移除。
-  </span>
+  </Tip>
 </PageHead>
 
 <div class="mb-4 flex flex-wrap items-center gap-2">
@@ -604,7 +602,7 @@
             </div>
 
             <div class="mt-3 text-[10px] text-[var(--color-text-faint)]">
-              改动已写入母版。点右上角「应用到各 agent」才会真正写进配置文件。
+              改动已写入母版，点「应用到各 agent」后生效。
             </div>
           </div>
         {/if}
@@ -618,15 +616,15 @@
 {/if}
 
 <!-- 边界说明 -->
-<div class="mt-4 rounded-[var(--radius-lg)] border border-[var(--color-border)] p-3">
-  <div class="text-[11px] leading-relaxed text-[var(--color-text-muted)]">
+<div class="mt-4">
+  <Tip label="应用时会动哪些配置">
     <strong class="text-[var(--color-text)]">只移除池子里的 server。</strong>
     各 agent 里用户手动配的、WorkBuddy 的市场连接器，都不在池子里，应用时不会被碰。
     <br />
     <span class="text-[var(--color-text-faint)]">
       这里的列由各 agent 的实现决定。某个 agent 没有出现，说明它没有声明 MCP 能力。
     </span>
-  </div>
+  </Tip>
 </div>
 
 {#if log}

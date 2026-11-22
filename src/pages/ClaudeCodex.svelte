@@ -28,6 +28,7 @@
   import Button from '../lib/components/Button.svelte';
   import Badge from '../lib/components/Badge.svelte';
   import Switch from '../lib/components/Switch.svelte';
+  import Tip from '../lib/components/Tip.svelte';
   import Log from '../lib/components/Log.svelte';
 
   let loading = $state(true);
@@ -126,7 +127,7 @@
 </script>
 
 <PageHead title="Claude & Codex">
-  这两个设置存在配置文件里，但两家工具都没有界面开关。放在这里集中改，不用手工编辑文件。
+  这两个设置只能改配置文件，两家工具都没有界面开关。
 </PageHead>
 
 <div class="mb-4 flex items-center gap-2">
@@ -170,11 +171,13 @@
           <div class="min-w-0">
             <div class="text-[13px] font-medium text-[var(--color-text)]">跳过首次引导</div>
             <p class="mt-1 text-[12px] leading-relaxed text-[var(--color-text-muted)]">
-              Claude Code 第一次启动会要求选主题并登录 Anthropic 账号。用第三方中转时那一步是多余的。
-              开启后写入 <code class="text-[11px]">~/.claude.json</code> 的
-              <code class="text-[11px]">hasCompletedOnboarding: true</code>，下次启动直接进主界面。
-              关闭是删掉这个字段（不是写 false），引导会重新出现。
+              第一次启动不再要求选主题和登录 Anthropic 账号，直接进主界面。
             </p>
+            <Tip label="它改了什么">
+              开启后写入 <code class="text-[11px]">~/.claude.json</code> 的
+              <code class="text-[11px]">hasCompletedOnboarding: true</code>；关闭是删掉这个字段
+              （不是写 false），引导会重新出现。
+            </Tip>
             <p
               class="mt-1.5 font-[var(--font-mono)] text-[11px] text-[var(--color-text-faint)]"
             >

@@ -14,6 +14,7 @@
   import PageHead from '../lib/components/PageHead.svelte';
   import Button from '../lib/components/Button.svelte';
   import Badge from '../lib/components/Badge.svelte';
+  import Tip from '../lib/components/Tip.svelte';
   import Log from '../lib/components/Log.svelte';
 
   let managed = $state<ManagedSkill[]>([]);
@@ -97,7 +98,10 @@
 </script>
 
 <PageHead title="Skills 更新">
-  由 <code class="font-[var(--font-mono)] text-[12px]">npx skills</code> 安装的第三方 skill。这里记录的是来源仓库和内容指纹，不是语义版本号——那套 CLI 本身只按目录树哈希判断有没有变化。
+  管理由 <code class="font-[var(--font-mono)] text-[12px]">npx skills</code> 安装的第三方 skill
+  <Tip label="「指纹」是什么" class="mt-1">
+    这里记录的是来源仓库和内容指纹，不是语义版本号 —— 那套 CLI 本身只按目录树哈希判断有没有变化。
+  </Tip>
 </PageHead>
 
 <div class="mb-4 flex flex-wrap items-center gap-2">
