@@ -155,7 +155,26 @@ pub fn run(cmd: Command) -> i32 {
                     return 1;
                 }
             };
+
+            // 先刷新合成文件再建链接，和 GUI 的 `sync_mappings_inner` 保持一致。
+            // 顺序不能反：`sync_one` 会检查源文件存在，而合成文件是派生物。
             let mut failed = 0;
+            for o in crate::doc::compose_all(!dry_run) {
+                match o.action.as_str() {
+                    "error" => {
+                        println!("[fail] 文档合成 {}: {}", o.agent, o.message);
+                        failed += 1;
+                    }
+                    "created" | "updated" | "removed" => {
+                        println!("[doc]  {}: {}", o.agent, o.message)
+                    }
+                    "skipped" if dry_run => {
+                        println!("[plan] 文档合成 {}: {}", o.agent, o.message)
+                    }
+                    _ => {}
+                }
+            }
+
             for spec in cfg.resolved_mappings() {
                 if spec.disabled {
                     println!("[skip] {}: 已取消映射", spec.label);
@@ -376,6 +395,145 @@ fn run_doc(cmd: DocCmd) -> i32 {
                     r.exit_code
                 }
             }
+        }
+
+        DocCmd::List => {
+            let docs = doc::list_agent_docs();
+            if print_json(&docs) {
+                return 0;
+            }
+            if docs.is_empty() {
+                println!("没有可接管指令文件的 agent。");
+                return 0;
+            }
+            println!("{:<12} {:<10} {:<10} {:>8}  {}", "agent", "专用片段", "合成", "字节", "目标");
+            for d in &docs {
+                let specific = if d.specific_exists { "有" } else { "-" };
+                let composed = match (&d.composed_path, d.composed_stale) {
+                    (None, _) => "-",
+                    (Some(_), true) => "待更新",
+                    (Some(_), false) => "最新",
+                };
+                println!(
+                    "{:<12} {:<10} {:<10} {:>8}  {}",
+                    d.agent, specific, composed, d.bytes, d.target
+                );
+            }
+            let stale = docs.iter().filter(|d| d.composed_stale).count();
+            if stale > 0 {
+                println!("\n{stale} 个合成文件待更新，跑 `agentcenter doc compose` 或 `sync`。");
+            }
+            0
+        }
+
+        DocCmd::Specific {
+            agent,
+            file,
+            clear,
+        } => {
+            if crate::agents::find(&agent).is_none() {
+                eprintln!("不认识的 agent：{agent}");
+                eprintln!("可用值：{}", crate::agents::ids().join(" / "));
+                return 1;
+            }
+
+            // 只读模式：打印当前专用片段
+            if file.is_none() && !clear {
+                return match doc::specific_read(&agent) {
+                    Ok(d) => {
+                        if print_json(&serde_json::json!({
+                            "agent": agent,
+                            "path": crate::config::contract_tilde(&doc::specific_path(&agent)),
+                            "exists": d.exists,
+                            "content": d.content,
+                            "bytes": d.content.len(),
+                        })) {
+                            return 0;
+                        }
+                        if !d.exists {
+                            eprintln!("{agent} 没有专用片段，它直接读通用母版。");
+                            eprintln!(
+                                "要新建：`agentcenter doc specific {agent} --file <路径>`"
+                            );
+                            return 1;
+                        }
+                        // 原样输出，方便重定向到文件
+                        print!("{}", d.content);
+                        if !d.content.ends_with('\n') {
+                            println!();
+                        }
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("读取失败: {e}");
+                        1
+                    }
+                };
+            }
+
+            // 写入模式。--clear 优先，其次读 --file / 标准输入
+            let content = if clear {
+                String::new()
+            } else {
+                match read_content_arg_allow_empty(file.as_deref()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return 1;
+                    }
+                }
+            };
+
+            let r = doc::specific_write(&agent, &content);
+            println!("{}", r.output);
+            if r.ok {
+                // 写完顺手合成，让 agent 立刻能读到新内容
+                for o in doc::compose_all(true) {
+                    if o.agent == agent {
+                        println!("[合成] {}", o.message);
+                    }
+                }
+                0
+            } else {
+                r.exit_code
+            }
+        }
+
+        DocCmd::Compose { dry_run } => {
+            let outcomes = doc::compose_all(!dry_run);
+            if print_json(&outcomes) {
+                return 0;
+            }
+            if outcomes.is_empty() {
+                println!("没有需要合成的文档。");
+                return 0;
+            }
+            for o in &outcomes {
+                println!("[{:<8}] {}：{}", o.action, o.agent, o.message);
+            }
+            0
+        }
+    }
+}
+
+/// 和 [`read_content_arg`] 一样，但允许空内容。
+///
+/// 专用片段写空内容是有意义的语义 —— "取消这个 agent 的专用内容"，
+/// 所以不能沿用母版那条"空内容一律拒绝"的规则。专用片段不是唯一真实来源，
+/// 清空它只是回到通用母版，不会丢失别处的数据。
+fn read_content_arg_allow_empty(file: Option<&str>) -> Result<String, String> {
+    use std::io::Read;
+
+    match file {
+        Some(path) => {
+            std::fs::read_to_string(path).map_err(|e| format!("读取 {path} 失败: {e}"))
+        }
+        None => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| format!("读取标准输入失败: {e}"))?;
+            Ok(buf)
         }
     }
 }
@@ -1982,7 +2140,7 @@ fn run_skills_apply(
             None => {
                 eprintln!("不认识的动作：{s}");
                 eprintln!(
-                    "可用值：import / dedupe / take-orphan / take-shared / delete / remove-link"
+                    "可用值：import / privatize / dedupe / take-orphan / take-shared / delete / remove-link"
                 );
                 return 1;
             }
@@ -1993,7 +2151,7 @@ fn run_skills_apply(
     if !dry_run && action.is_none() {
         eprintln!("缺少 --action。");
         eprintln!(
-            "可用值：import / dedupe / take-orphan / take-shared / delete / remove-link"
+            "可用值：import / privatize / dedupe / take-orphan / take-shared / delete / remove-link"
         );
         eprintln!("先跑 `agentcenter skills apply --dry-run` 看每条散落项各自能用哪个。");
         return 1;
@@ -2112,7 +2270,7 @@ fn run_skills_apply(
 fn available_actions(relation: crate::types::OrphanRelation) -> Vec<crate::types::OrphanAction> {
     use crate::types::{OrphanAction::*, OrphanRelation::*};
     match relation {
-        Unique => vec![Import, Delete],
+        Unique => vec![Import, Privatize, Delete],
         Identical => vec![Dedupe, Delete],
         Conflict => vec![TakeOrphan, TakeShared, Delete],
         BrokenLink => vec![RemoveLink],
@@ -2131,7 +2289,7 @@ fn run_skills(cmd: SkillsCmd) -> i32 {
 
     match cmd {
         SkillsCmd::List => {
-            match skills::list_skills(&cfg.skills.tags) {
+            match skills::list_skills(&cfg.skills) {
                 Ok(list) => {
                     if print_json(&list) {
                         return 0;
@@ -2251,6 +2409,7 @@ fn run_skills(cmd: SkillsCmd) -> i32 {
                 }
             }
         }
+        SkillsCmd::Private { cmd } => run_skills_private(cmd),
         SkillsCmd::Tag { name, add } => {
             let mut cfg = Config::load().unwrap_or_default();
             if add.is_empty() {
@@ -2281,6 +2440,185 @@ fn run_skills(cmd: SkillsCmd) -> i32 {
                 0
             } else {
                 r.exit_code
+            }
+        }
+    }
+}
+
+/// 专用 skill 子命令。
+///
+/// 和 `skills apply --action privatize` 的关系：那个从散落扫描结果里挑一条就地
+/// 私有化，这个可以直接指定 skill 名和多个 agent。两者最终都调
+/// `skills::privatize_one`，只是取本体的路径来源不同。
+fn run_skills_private(cmd: crate::cli::SkillsPrivateCmd) -> i32 {
+    use crate::cli::SkillsPrivateCmd;
+
+    match cmd {
+        SkillsPrivateCmd::List => {
+            let cfg = match Config::load() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("读取配置失败: {e}");
+                    return 1;
+                }
+            };
+            let views: Vec<crate::types::SkillMappingView> = cfg
+                .skills
+                .mappings
+                .iter()
+                .map(skills::inspect_private)
+                .collect();
+
+            if print_json(&views) {
+                return 0;
+            }
+            if views.is_empty() {
+                println!("没有专用 skill。");
+                println!("用 `agentcenter skills private add <name> --agent <agent>` 标记一个。");
+                return 0;
+            }
+
+            for v in &views {
+                let state = match v.state {
+                    crate::types::PrivateLinkState::Ok => "正常",
+                    crate::types::PrivateLinkState::Broken => "断链",
+                    crate::types::PrivateLinkState::Missing => "缺失",
+                };
+                println!("{}  [{}]  {}", v.skill, state, v.agents.join(","));
+                println!("  本体  {}", v.store_path);
+                for l in &v.links {
+                    let ls = match l.state {
+                        crate::types::PrivateLinkState::Ok => "ok",
+                        crate::types::PrivateLinkState::Broken => "broken",
+                        crate::types::PrivateLinkState::Missing => "missing",
+                    };
+                    let note = l
+                        .note
+                        .as_ref()
+                        .map(|n| format!("  ({n})"))
+                        .unwrap_or_default();
+                    println!("  {:<10} {}  {}{note}", l.agent, l.path, ls);
+                }
+            }
+            0
+        }
+
+        SkillsPrivateCmd::Add { skill, agents } => {
+            // 校验 agent id：拼错的话目标位置算不出来，建完链接 agent 也读不到
+            let mut bad = Vec::new();
+            for a in &agents {
+                if crate::agents::find(a).is_none() {
+                    bad.push(a.clone());
+                }
+            }
+            if !bad.is_empty() {
+                eprintln!("不认识的 agent：{}", bad.join(", "));
+                eprintln!("可用值：{}", crate::agents::ids().join(" / "));
+                return 1;
+            }
+
+            // 找本体：优先 agent 自己的 skills 目录，其次公共库
+            let mut found: Option<std::path::PathBuf> = None;
+            for a in &agents {
+                if let Some(agent) = crate::agents::find(a) {
+                    let candidate = agent.skills_dir().join(&skill);
+                    if candidate.join("SKILL.md").exists() && !link::is_link(&candidate) {
+                        found = Some(candidate);
+                        break;
+                    }
+                }
+            }
+            if found.is_none() {
+                let candidate = skills::shared_skills_dir().join(&skill);
+                if candidate.join("SKILL.md").exists() {
+                    found = Some(candidate);
+                }
+            }
+            let Some(src) = found else {
+                eprintln!("找不到 {skill} 的目录。");
+                eprintln!("在下列位置都没找到含 SKILL.md 的目录：");
+                for a in &agents {
+                    if let Some(agent) = crate::agents::find(a) {
+                        eprintln!("  {}", agent.skills_dir().join(&skill).display());
+                    }
+                }
+                eprintln!("  {}", skills::shared_skills_dir().join(&skill).display());
+                eprintln!("\n先用 `agentcenter skills scan` 看它现在在哪。");
+                return 1;
+            };
+
+            // 第一个 agent 决定本体落在哪个专用库
+            let primary = &agents[0];
+            let r = match skills::privatize_one(&src, primary) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("标记专用失败：{e}");
+                    return 1;
+                }
+            };
+            println!("{r}");
+
+            // 其余 agent：写进同一条记录，然后跑一次 sync 把链接建全
+            if agents.len() > 1 {
+                let mut cfg = match Config::load() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("读取配置失败: {e}");
+                        return 1;
+                    }
+                };
+                if let Some(m) = cfg.skills.mappings.iter_mut().find(|m| m.skill == skill) {
+                    m.agents = agents.clone();
+                    m.agents.dedup();
+                }
+                if let Err(e) = cfg.save() {
+                    eprintln!("写配置失败: {e}");
+                    return 1;
+                }
+                match skills::sync_private_links(false) {
+                    Ok(log) => {
+                        for line in log {
+                            if line.contains(&skill) {
+                                println!("{line}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("建链接失败：{e}");
+                        return 1;
+                    }
+                }
+            }
+
+            0
+        }
+
+        SkillsPrivateCmd::Sync { dry_run } => match skills::sync_private_links(dry_run) {
+            Ok(log) => {
+                if print_json(&log) {
+                    return 0;
+                }
+                for line in log {
+                    println!("{line}");
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("同步失败: {e}");
+                1
+            }
+        },
+
+        SkillsPrivateCmd::Remove { skill, to_shared } => {
+            match skills::remove_private(&skill, to_shared) {
+                Ok(msg) => {
+                    println!("{msg}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("取消失败：{e}");
+                    1
+                }
             }
         }
     }

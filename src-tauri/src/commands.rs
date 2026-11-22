@@ -6,7 +6,7 @@
 
 use crate::config::Config;
 use crate::types::{
-    CollectPlan, GitStatus, ManagedSkill, Mapping, OrphanSkill, RunResult, Skill,
+    CollectPlan, GitStatus, ManagedSkill, Mapping, OrphanSkill, RunResult, Skill, SkillMappingView,
 };
 use crate::{git, link, skills, skillscli};
 
@@ -38,6 +38,28 @@ fn sync_mappings_inner(dry_run: bool) -> Result<RunResult, String> {
     let mut log = Vec::new();
     let mut synced = 0;
     let mut skipped = 0;
+
+    // 先刷新合成文件，再建链接。
+    //
+    // 顺序不能反：`link::sync_one` 会先检查 `m.source.exists()`，
+    // 而合成文件是派生物，可能还没生成或已经落后。先合成能保证
+    // 链接指向的内容就是最新拼出来的那一份。
+    //
+    // dry_run 时不写盘，但仍要报告哪些合成文件会重建 ——
+    // 否则用户看到「预览无变化」，真跑却改了文件。
+    for outcome in crate::doc::compose_all(!dry_run) {
+        match outcome.action.as_str() {
+            "skipped" if dry_run => {
+                log.push(format!("[预览] 文档合成 {}：{}", outcome.agent, outcome.message))
+            }
+            "created" | "updated" | "removed" => log.push(format!(
+                "[文档] {}：{}",
+                outcome.agent, outcome.message
+            )),
+            "error" => log.push(format!("[失败] 文档合成 {}：{}", outcome.agent, outcome.message)),
+            _ => {}
+        }
+    }
 
     for m in &resolved {
         if m.disabled {
@@ -196,11 +218,51 @@ pub fn create_doc(content: String) -> Result<RunResult, String> {
     Ok(crate::doc::create(&content))
 }
 
+/// 列出每个 agent 的指令文档现状：有无专用片段、合成是否落后。
+///
+/// 纯只读，界面可以频繁调用。
+#[tauri::command]
+pub fn list_agent_docs() -> Result<Vec<crate::types::AgentDoc>, String> {
+    Ok(crate::doc::list_agent_docs())
+}
+
+/// 读某个 agent 的专用片段。没有片段时返回 `exists=false`。
+#[tauri::command]
+pub fn read_agent_doc(agent: String) -> Result<crate::doc::DocContent, String> {
+    crate::doc::specific_read(&agent).map_err(|e| e.to_string())
+}
+
+/// 写某个 agent 的专用片段。内容为空表示取消这个 agent 的专用内容。
+#[tauri::command]
+pub fn save_agent_doc(agent: String, content: String) -> Result<RunResult, String> {
+    Ok(crate::doc::specific_write(&agent, &content))
+}
+
+/// 重建所有 agent 的合成指令文档。`dry_run` 为真时只报告。
+///
+/// 独立成命令是为了让用户能单独刷新文档而不碰链接 —— 比如只想看看
+/// 合成后有多大。`sync` 内部也会先跑一遍这个。
+#[tauri::command]
+pub fn compose_agent_docs(dry_run: bool) -> Result<RunResult, String> {
+    let outcomes = crate::doc::compose_all(!dry_run);
+    if outcomes.is_empty() {
+        return Ok(RunResult::success("没有需要合成的文档".to_string()));
+    }
+    let lines: Vec<String> = outcomes
+        .iter()
+        .map(|o| format!("[{}] {}：{}", o.action, o.agent, o.message))
+        .collect();
+    Ok(RunResult::success(lines.join("\n")))
+}
+
 /// 列出中心库里的所有 skill。
+///
+/// 公共 skill 和专用 skill 一起返回：`agents` 为空表示公共，
+/// 非空表示只给那几个 agent 用。分开查询会让界面要在两处拼一张表。
 #[tauri::command]
 pub fn list_skills() -> Result<Vec<Skill>, String> {
     let cfg = Config::load().map_err(|e| e.to_string())?;
-    skills::list_skills(&cfg.skills.tags).map_err(|e| e.to_string())
+    skills::list_skills(&cfg.skills).map_err(|e| e.to_string())
 }
 
 /// 覆盖某个 skill 的标签。
@@ -250,6 +312,38 @@ pub fn collect_skills(apply: bool) -> Result<CollectPlan, String> {
     }
 
     Ok(plan)
+}
+
+/// 列出全部专用 skill 记录及其链接现场状态。
+///
+/// 纯只读。界面用它渲染专用 skill 管理区，CLI 的
+/// `skills private list --json` 也用它。
+#[tauri::command]
+pub fn list_skill_mappings() -> Result<Vec<SkillMappingView>, String> {
+    let cfg = Config::load().map_err(|e| e.to_string())?;
+    Ok(cfg
+        .skills
+        .mappings
+        .iter()
+        .map(skills::inspect_private)
+        .collect())
+}
+
+/// 重建专用 skill 的链接。`dry_run` 为真时只报告会做什么。
+#[tauri::command]
+pub fn sync_skill_mappings(dry_run: bool) -> Result<Vec<String>, String> {
+    skills::sync_private_links(dry_run).map_err(|e| e.to_string())
+}
+
+/// 取消一条专用记录。
+///
+/// `to_shared` 为真时本体移回公共库；为假时先备份到
+/// `~/.agents/backup/` 再删。两种都会删掉各 agent 目录里的链接。
+#[tauri::command]
+pub fn remove_skill_mapping(skill: String, to_shared: bool) -> Result<RunResult, String> {
+    skills::remove_private(&skill, to_shared)
+        .map(RunResult::success)
+        .map_err(|e| e.to_string())
 }
 
 /// 对一条散落 skill 执行用户选定的处置。
@@ -329,7 +423,7 @@ pub fn inspect_credentials() -> Result<crate::types::CredentialOverview, String>
 
 // ---- provider 统一管理 ----
 
-/// 列出母版里的 provider。不返回密钥原文，只给长度和末尾。
+/// 列出母版里的 provider。key 原文一并返回，供编辑框显示当前值。
 #[tauri::command]
 pub async fn list_providers() -> Result<Vec<crate::types::ProviderView>, String> {
     tauri::async_runtime::spawn_blocking(list_providers_inner)
@@ -370,6 +464,7 @@ fn list_providers_inner() -> Result<Vec<crate::types::ProviderView>, String> {
                 note: p.note,
                 key_len: p.api_key.len(),
                 key_tail: if p.api_key.len() >= 4 { tail } else { String::new() },
+                api_key: p.api_key,
             }
         })
         .collect())

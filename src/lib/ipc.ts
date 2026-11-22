@@ -9,6 +9,7 @@
  * 光靠 `npm run dev` 就能把界面调完。
  */
 import type {
+  AgentDoc,
   BackfillReport,
   ClaudeModelMap,
   ClaudeOnboardingStatus,
@@ -33,6 +34,7 @@ import type {
   ProviderView,
   RunResult,
   Skill,
+  SkillMappingView,
   UsageReport,
 } from './types';
 
@@ -97,6 +99,34 @@ export const saveDoc = (content: string) => call<RunResult>('save_doc', { conten
 /** 创建母版文件，已存在时拒绝覆盖。 */
 export const createDoc = (content: string) => call<RunResult>('create_doc', { content });
 
+// ---- 每个 agent 的专用指令片段 ----
+//
+// 有专用片段的 agent 读的是「通用 + 专用」的合成产物；没有的仍直接读通用母版。
+
+/** 列出每个 agent 的片段与合成状态。纯只读。 */
+export const listAgentDocs = () => call<AgentDoc[]>('list_agent_docs');
+
+/** 读某个 agent 的专用片段。没有片段时 exists 为 false。 */
+export const readAgentDoc = (agent: string) => call<DocContent>('read_agent_doc', { agent });
+
+/**
+ * 写某个 agent 的专用片段。
+ *
+ * 内容为空（trim 后）表示取消这个 agent 的专用内容：删掉片段文件，
+ * 之后它回到直接读通用母版。写之前旧版会备份到 ~/.agents/backup/。
+ */
+export const saveAgentDoc = (agent: string, content: string) =>
+  call<RunResult>('save_agent_doc', { agent, content });
+
+/**
+ * 重建所有 agent 的合成指令文档。
+ *
+ * dryRun 为真时只报告哪些落后了。`syncMappings` 内部也会先跑一遍这个，
+ * 所以一般不需要单独调用。
+ */
+export const composeAgentDocs = (dryRun = false) =>
+  call<RunResult>('compose_agent_docs', { dryRun });
+
 // ---- skills ----
 
 /** 列出中心库里的所有 skill。 */
@@ -118,9 +148,34 @@ export const collectSkills = (apply: boolean) =>
  *
  * 与 collectSkills 的区别：那个按关系套固定策略批量处理，这个由用户在
  * 散落清单里逐条点。可能移动或删除磁盘上的目录。
+ *
+ * 选 `privatize` 时，后端会从路径反推所属 agent，把本体移进
+ * `~/.agents/skills-mapping-<agent>/` 并写一条归属记录。
  */
 export const applyOrphanAction = (path: string, action: OrphanAction) =>
   call<OrphanActionResult>('apply_orphan_action', { path, action });
+
+// ---- 专用 skill ----
+
+/** 列出全部专用 skill 记录及每条链接的现场状态。纯只读。 */
+export const listSkillMappings = () => call<SkillMappingView[]>('list_skill_mappings');
+
+/**
+ * 重建专用 skill 的链接。幂等，已经是对的链接直接跳过。
+ *
+ * dryRun 为真时只返回会做什么，不动磁盘。
+ */
+export const syncSkillMappings = (dryRun = false) =>
+  call<string[]>('sync_skill_mappings', { dryRun });
+
+/**
+ * 取消一条专用记录。
+ *
+ * toShared 为真时本体移回公共库 `~/.agents/skills`，变成所有 agent 都能用；
+ * 为假时先备份到 `~/.agents/backup/` 再删。两种都会删掉各 agent 目录里的链接。
+ */
+export const removeSkillMapping = (skill: string, toShared: boolean) =>
+  call<RunResult>('remove_skill_mapping', { skill, toShared });
 
 // ---- npx skills ----
 

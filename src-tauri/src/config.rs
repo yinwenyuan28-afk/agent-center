@@ -58,11 +58,86 @@ impl Default for SourceConfig {
 /// 不会因为目录内多出一个文件而报冲突。
 pub type SkillTags = BTreeMap<String, Vec<String>>;
 
+/// 一条「只给某几个 agent 用」的 skill 归属记录。
+///
+/// 本体放在 `~/.agents/skills-mapping-<第一个 agent>/<skill>`，
+/// 其余 agent 的 skills 目录里各建一个指向本体的链接。
+/// 记录存在的意义是：链接断了能查出来并重建，想取消时知道该删哪些地方的链接。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillMappingConfig {
+    /// skill 目录名，同时是唯一标识
+    pub skill: String,
+    /// 归属哪些 agent。第一个 agent 的专用库目录存放本体。
+    ///
+    /// 之所以允许多个：同一个 skill 给 cursor 和 zcode 都用的情况确实存在，
+    /// 那时本体只存一份，两边链接指向它，不重复占空间。
+    #[serde(default)]
+    pub agents: Vec<String>,
+    /// 链接方式，默认 auto
+    #[serde(default = "default_mode")]
+    pub mode: LinkMode,
+}
+
+impl SkillMappingConfig {
+    /// 本体所在的专用库目录：`~/.agents/skills-mapping-<agents[0]>`。
+    ///
+    /// 返回 `~` 展开后的绝对路径。`agents` 为空时返回 None ——
+    /// 那是配置写坏了，调用方应该跳过并在界面上报出来，而不是猜一个 agent。
+    pub fn store_dir(&self) -> Option<PathBuf> {
+        self.agents
+            .first()
+            .map(|a| crate::skills::private_skills_root(a))
+    }
+
+    /// 所有需要建链接的目标位置。
+    ///
+    /// 只包含真实存在的 agent 实现。配置里写了未知 agent id 时跳过 ——
+    /// 和 `resolved_mappings` 的处理不同：那里允许自定义 agent（用户可以手写
+    /// 路径），这里的目标位置必须由 agent 自己声明 skills_dir，猜不出来。
+    pub fn targets(&self) -> Vec<(String, PathBuf)> {
+        let mut out = Vec::new();
+        for id in &self.agents {
+            if let Some(agent) = crate::agents::find(id) {
+                out.push((agent.id().to_string(), agent.skills_dir().join(&self.skill)));
+            }
+        }
+        out
+    }
+}
+
 /// `[skills]` 段。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillsConfig {
     #[serde(default)]
     pub tags: SkillTags,
+    /// 专用 skill 归属记录。空表示所有 skill 都在公共库里。
+    #[serde(default)]
+    pub mappings: Vec<SkillMappingConfig>,
+}
+
+impl SkillsConfig {
+    /// 找某个 skill 的专用记录。
+    pub fn mapping_for(&self, skill: &str) -> Option<&SkillMappingConfig> {
+        self.mappings.iter().find(|m| m.skill == skill)
+    }
+
+    /// 写入或覆盖一条专用记录。同名记录只保留一条。
+    pub fn upsert_mapping(&mut self, entry: SkillMappingConfig) {
+        if let Some(idx) = self.mappings.iter().position(|m| m.skill == entry.skill) {
+            self.mappings[idx] = entry;
+        } else {
+            self.mappings.push(entry);
+        }
+        // 排序让写回配置的 diff 稳定，不受操作顺序影响
+        self.mappings.sort_by(|a, b| a.skill.cmp(&b.skill));
+    }
+
+    /// 删掉某个 skill 的专用记录，返回是否真的删了。
+    pub fn remove_mapping(&mut self, skill: &str) -> bool {
+        let before = self.mappings.len();
+        self.mappings.retain(|m| m.skill != skill);
+        self.mappings.len() != before
+    }
 }
 
 /// `[usage]` 段：token 用量统计的开关。
@@ -187,6 +262,10 @@ impl Config {
     ///
     /// 用户配置里写了的 agent 用用户的路径，没写的用 agent 实现的默认路径。
     /// 没有单一指令文件的 agent（如 workbuddy）不会出现在结果里。
+    ///
+    /// **source 是按 agent 算的，不是全局一个值**：有专用片段的 agent 指向
+    /// 它自己的合成产物（`~/.agents/composed/<agent>.md`），没有的仍指向
+    /// 通用母版 `~/.agents/AGENTS.md`。这样升级工具不会改动任何一个既有映射。
     pub fn resolved_mappings(&self) -> Vec<ResolvedMapping> {
         let mut out = Vec::new();
 
@@ -206,7 +285,7 @@ impl Config {
             out.push(ResolvedMapping {
                 agent: agent.id().to_string(),
                 label: agent.label().to_string(),
-                source: self.source_path(),
+                source: crate::doc::effective_source(agent.id()),
                 target,
                 mode,
                 disabled,
@@ -221,7 +300,9 @@ impl Config {
                 out.push(ResolvedMapping {
                     agent: m.agent.clone(),
                     label: m.agent.clone(),
-                    source: self.source_path(),
+                    // 自定义 agent 也支持专用片段：路径按 agent id 算，
+                    // 不依赖注册表，所以接任何新工具都能用同一套机制
+                    source: crate::doc::effective_source(&m.agent),
                     target: expand_tilde(&m.to),
                     mode: m.mode,
                     disabled: m.disabled,

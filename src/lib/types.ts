@@ -11,6 +11,35 @@ export type LinkKind = 'symlink' | 'junction' | 'hardlink' | 'copy';
 /** 单条映射的健康状态。 */
 export type HealthState = 'ok' | 'drifted' | 'broken' | 'missing';
 
+/**
+ * 一个 agent 的指令文档现状：通用片段 + 专用片段 + 合成产物。
+ *
+ * 有专用片段的 agent 读的是「通用 + 专用」拼出来的合成文件；
+ * 没有的仍直接读通用母版。界面用它渲染片段选项卡和「待生成」提示。
+ */
+export interface AgentDoc {
+  /** agent 标识，如 cursor */
+  agent: string;
+  /** 展示名 */
+  label: string;
+  /** 通用母版路径 */
+  commonPath: string;
+  /** 该 agent 的指令文件最终落点，如 ~/.cursor/AGENTS.md */
+  target: string;
+  /** 专用片段路径，无论存不存在都给出来，方便界面做「新建」 */
+  specificPath: string;
+  /** 专用片段是否存在。false 表示这个 agent 直接读通用母版 */
+  specificExists: boolean;
+  /** 合成产物路径。没有专用片段时为 null */
+  composedPath: string | null;
+  /** 合成产物与当前片段内容不一致，需要重建 */
+  composedStale: boolean;
+  /** 这个 agent 最终会读到的字节数 */
+  bytes: number;
+  /** 该 agent 的配置目录是否存在。false 表示工具未安装 */
+  installed: boolean;
+}
+
 /** 一个 agent 的指令文件映射及其当前状态。 */
 export interface Mapping {
   /** agent 标识，如 claude / zcode / cursor */
@@ -53,6 +82,47 @@ export interface Skill {
   fileCount: number;
   /** 目录字节数 */
   sizeBytes: number;
+  /** 归属的 agent 列表。空数组 = 公共 skill，所有 agent 都能读 */
+  agents: string[];
+  /** 专用 skill 的本体目录，如 ~/.agents/skills-mapping-cursor/issue-scoper */
+  storePath: string | null;
+  /** 专用 skill 的链接健康状态。公共 skill 恒为 'ok' */
+  linkState: PrivateLinkState;
+}
+
+/** 专用 skill 的链接健康状态。 */
+export type PrivateLinkState = 'ok' | 'broken' | 'missing';
+
+/** 专用 skill 在某个 agent 目录里的一处链接现场。 */
+export interface PrivateLinkView {
+  /** agent 标识 */
+  agent: string;
+  /** agent 展示名 */
+  label: string;
+  /** 该 agent 的 skills 目录里这个 skill 的位置 */
+  path: string;
+  /** 这一处的状态 */
+  state: PrivateLinkState;
+  /** 实际链接方式，不是链接时为空 */
+  actual: LinkKind | null;
+  /** 补充说明，如 "链接指向 xx，不是专用库那一份" */
+  note: string | null;
+}
+
+/** 一条专用 skill 记录的完整视图。 */
+export interface SkillMappingView {
+  skill: string;
+  agents: string[];
+  /** 本体所在目录 */
+  storePath: string;
+  /** 本体是否存在 */
+  storeExists: boolean;
+  /** 各 agent 的链接状态 */
+  links: PrivateLinkView[];
+  /** 整体状态：全部 ok 才 ok，否则取最差的那个 */
+  state: PrivateLinkState;
+  /** 配置里要求的链接方式 */
+  mode: 'auto' | LinkKind;
 }
 
 /** 散落在别的 agent 目录里、尚未收进 ~/.agents 的 skill。 */
@@ -60,6 +130,8 @@ export interface OrphanSkill {
   name: string;
   /** 出现在哪个 agent 目录，如 ".cursor/skills" */
   location: string;
+  /** 哪个 agent 的目录，如 "cursor"。为 null 时不能标记专用 */
+  agent: string | null;
   /** 完整路径 */
   path: string;
   /** 与中心库同名 skill 的比对结果 */
@@ -78,13 +150,18 @@ export interface OrphanSkill {
  * 用户对一条散落 skill 选定的处置方式。
  *
  * 每个 relation 可用的动作：
- * - unique        → import（移入）/ delete（删掉）
+ * - unique        → import（移入中心库）/ privatize（标记为当前 agent 专用）
+ *                   / delete（删掉）
  * - identical     → dedupe（用中心库那份，原位置建链接）/ delete
  * - conflict      → take-orphan（采用散落版）/ take-shared（采用中心库版）/ delete
  * - broken-link   → remove-link
+ *
+ * privatize 只对 unique 开放：中心库已有同名 skill 时，那份是公共的，
+ * 把它标成专用等于拿走别人也在用的东西。
  */
 export type OrphanAction =
   | 'import'
+  | 'privatize'
   | 'dedupe'
   | 'take-orphan'
   | 'take-shared'
@@ -294,6 +371,13 @@ export interface ProviderView {
    */
   codexModel: string | null;
   note: string;
+  /**
+   * key 明文原文。
+   *
+   * 母版文件本身就是明文，界面又是本机 WebView，所以直接给原文 ——
+   * 编辑框能显示当前 key，不用凭末尾 4 位猜。
+   */
+  apiKey: string;
   /** key 长度，0 表示没配 */
   keyLen: number;
   /** key 末尾 4 位 */

@@ -103,6 +103,18 @@ pub fn backup_dir_copy(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(dest)
 }
 
+/// 把一个**文件**复制进备份目录，返回备份后的位置。原文件保留。
+///
+/// 单独一个函数而不是让 [`backup_dir_copy`] 兼容两种情况：那个走
+/// `read_dir`，对文件会直接报错，混在一起写只会让两者都变难读。
+///
+/// 用途是"覆盖或删除用户写的内容之前先留一份"，比如文档片段。
+pub fn backup_file_copy(path: &Path) -> anyhow::Result<PathBuf> {
+    let dest = new_backup_slot(path)?;
+    fs::copy(path, &dest)?;
+    Ok(dest)
+}
+
 /// 在备份目录里给一个路径腾出位置，返回备份目标路径。
 ///
 /// 只建目录、算路径，不搬东西 —— 文件和目录的搬运方式不同
@@ -256,7 +268,11 @@ pub fn inspect(m: &ResolvedMapping) -> Mapping {
 /// 第 2 步是必需的：硬链接不是 reparse point，
 /// `is_symlink()` 对它是 false，只靠路径和内容判断会把
 /// 硬链接误认成「内容相同的两份副本」。
-fn same_file(a: &Path, b: &Path) -> bool {
+///
+/// 对目录也适用（前两步走目录句柄与规范化路径，第三步退化为
+/// 目录指纹比对）。专用 skill 的链接检查要用它判断「链接指向的
+/// 是不是专用库那一份」。
+pub fn same_file(a: &Path, b: &Path) -> bool {
     if let (Ok(ca), Ok(cb)) = (fs::canonicalize(a), fs::canonicalize(b)) {
         if ca == cb {
             return true;
@@ -337,7 +353,7 @@ fn is_same_inode(a: &Path, b: &Path) -> bool {
 /// 重解析点，需要用目标是否可写、以及路径语义来区分。这里用
 /// `read_link` 的返回值形态做近似判断：junction 的目标总是绝对路径，
 /// 且 junction 只能指向目录。
-fn detect_link_kind(path: &Path) -> LinkKind {
+pub(crate) fn detect_link_kind(path: &Path) -> LinkKind {
     #[cfg(windows)]
     {
         // 目录链接在 Windows 上通常是 junction

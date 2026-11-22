@@ -10,6 +10,7 @@
  * 一旦编译出真后端，这份文件不会被打进 Tauri 产物。
  */
 import type {
+  AgentDoc,
   CollectPlan,
   GitStatus,
   ManagedSkill,
@@ -18,6 +19,7 @@ import type {
   OrphanSkill,
   RunResult,
   Skill,
+  SkillMappingView,
   UsageAgentStatus,
   UsageCharts,
   UsageRow,
@@ -125,39 +127,116 @@ const mappingsRaw: Omit<Mapping, 'disabled'>[] = [
  */
 const mappings: Mapping[] = mappingsRaw.map((m) => ({ ...m, disabled: false }));
 
-/** 18 个 skill 的真实清单。managed 与 source 来自 .skill-lock.json。 */
+/**
+ * 18 个公共 skill 的真实清单。managed 与 source 来自 .skill-lock.json。
+ * 末尾两个是专用 skill 的样例，和本机 `~/.cursor/skills` 里那两套对应。
+ */
+const pub = (s: Omit<Skill, 'agents' | 'storePath' | 'linkState'>): Skill => ({
+  ...s,
+  agents: [],
+  storePath: null,
+  linkState: 'ok',
+});
+
 const skills: Skill[] = [
-  { name: 'agent-browser', description: '浏览器自动化 CLI，用于点击、填表、截图、提取页面数据', tags: [], managed: true, source: 'vercel-labs/agent-browser', hash: '82def678', fileCount: 3, sizeBytes: 8420 },
-  { name: 'agents-md', description: '为仓库生成或审查 AGENTS.md', tags: ['文档'], managed: false, source: null, hash: 'a1b2c3d4', fileCount: 9, sizeBytes: 24800 },
-  { name: 'ai-text-readable', description: '让 AI 生成的文档和注释读得懂', tags: ['文档'], managed: false, source: null, hash: 'b2c3d4e5', fileCount: 6, sizeBytes: 18400 },
-  { name: 'deepseek-search', description: '用 DeepSeek 官方接口做联网搜索与正文抓取', tags: ['搜索'], managed: false, source: null, hash: 'c3d4e5f6', fileCount: 8, sizeBytes: 41200 },
-  { name: 'eli5', description: '按读者水平重新解释概念', tags: [], managed: false, source: null, hash: 'd4e5f6a7', fileCount: 2, sizeBytes: 6200 },
-  { name: 'find-skills', description: '发现并安装新的 agent skill', tags: [], managed: true, source: 'vercel-labs/skills', hash: 'e5f6a7b8', fileCount: 2, sizeBytes: 9800 },
-  { name: 'frontend-design', description: '界面视觉设计与排版指导', tags: ['UI设计'], managed: false, source: null, hash: 'f6a7b8c9', fileCount: 3, sizeBytes: 12600 },
-  { name: 'git-push-rebase', description: 'git 提交推送与变基全流程', tags: [], managed: false, source: null, hash: 'a7b8c9d0', fileCount: 1, sizeBytes: 5200 },
-  { name: 'grill-me', description: '对计划或决定做高强度追问', tags: [], managed: false, source: null, hash: 'b8c9d0e1', fileCount: 2, sizeBytes: 7400 },
-  { name: 'learn-hard-concept', description: '先例子后定义的概念学习协议', tags: [], managed: false, source: null, hash: 'c9d0e1f2', fileCount: 4, sizeBytes: 16800 },
-  { name: 'minimax-docx', description: '专业 DOCX 文档创建与编辑', tags: [], managed: true, source: 'MiniMax-AI/skills', hash: 'e55cc738', fileCount: 75, sizeBytes: 186400 },
-  { name: 'minimax-pdf', description: '注重视觉质量的 PDF 生成', tags: [], managed: true, source: 'MiniMax-AI/skills', hash: 'f1a2b3c4', fileCount: 12, sizeBytes: 34200 },
-  { name: 'minimax-xlsx', description: 'Excel 表格创建、分析与校验', tags: [], managed: true, source: 'MiniMax-AI/skills', hash: 'a2b3c4d5', fileCount: 25, sizeBytes: 72800 },
-  { name: 'plan-execute', description: '复杂开发任务先写计划再执行', tags: [], managed: false, source: null, hash: 'b3c4d5e6', fileCount: 19, sizeBytes: 48600 },
-  { name: 'pptx-generator', description: 'PowerPoint 演示文稿生成与编辑', tags: [], managed: true, source: 'MiniMax-AI/skills', hash: 'c4d5e6f7', fileCount: 6, sizeBytes: 21400 },
-  { name: 'project-docs-architecture', description: '编写系统架构与组件文档', tags: ['文档'], managed: false, source: null, hash: 'd5e6f7a8', fileCount: 5, sizeBytes: 15200 },
-  { name: 'project-docs-readme', description: '编写项目 README', tags: ['文档'], managed: false, source: null, hash: 'e6f7a8b9', fileCount: 4, sizeBytes: 11800 },
-  { name: 'ui-design', description: '界面偏好：文案、层级、主题与本地化', tags: ['UI设计'], managed: false, source: null, hash: 'f7a8b9c0', fileCount: 7, sizeBytes: 22600 },
+  pub({ name: 'agent-browser', description: '浏览器自动化 CLI，用于点击、填表、截图、提取页面数据', tags: [], managed: true, source: 'vercel-labs/agent-browser', hash: '82def678', fileCount: 3, sizeBytes: 8420 }),
+  pub({ name: 'agents-md', description: '为仓库生成或审查 AGENTS.md', tags: ['文档'], managed: false, source: null, hash: 'a1b2c3d4', fileCount: 9, sizeBytes: 24800 }),
+  pub({ name: 'ai-text-readable', description: '让 AI 生成的文档和注释读得懂', tags: ['文档'], managed: false, source: null, hash: 'b2c3d4e5', fileCount: 6, sizeBytes: 18400 }),
+  pub({ name: 'deepseek-search', description: '用 DeepSeek 官方接口做联网搜索与正文抓取', tags: ['搜索'], managed: false, source: null, hash: 'c3d4e5f6', fileCount: 8, sizeBytes: 41200 }),
+  pub({ name: 'eli5', description: '按读者水平重新解释概念', tags: [], managed: false, source: null, hash: 'd4e5f6a7', fileCount: 2, sizeBytes: 6200 }),
+  pub({ name: 'find-skills', description: '发现并安装新的 agent skill', tags: [], managed: true, source: 'vercel-labs/skills', hash: 'e5f6a7b8', fileCount: 2, sizeBytes: 9800 }),
+  pub({ name: 'frontend-design', description: '界面视觉设计与排版指导', tags: ['UI设计'], managed: false, source: null, hash: 'f6a7b8c9', fileCount: 3, sizeBytes: 12600 }),
+  pub({ name: 'git-push-rebase', description: 'git 提交推送与变基全流程', tags: [], managed: false, source: null, hash: 'a7b8c9d0', fileCount: 1, sizeBytes: 5200 }),
+  pub({ name: 'grill-me', description: '对计划或决定做高强度追问', tags: [], managed: false, source: null, hash: 'b8c9d0e1', fileCount: 2, sizeBytes: 7400 }),
+  pub({ name: 'learn-hard-concept', description: '先例子后定义的概念学习协议', tags: [], managed: false, source: null, hash: 'c9d0e1f2', fileCount: 4, sizeBytes: 16800 }),
+  pub({ name: 'minimax-docx', description: '专业 DOCX 文档创建与编辑', tags: [], managed: true, source: 'MiniMax-AI/skills', hash: 'e55cc738', fileCount: 75, sizeBytes: 186400 }),
+  pub({ name: 'minimax-pdf', description: '注重视觉质量的 PDF 生成', tags: [], managed: true, source: 'MiniMax-AI/skills', hash: 'f1a2b3c4', fileCount: 12, sizeBytes: 34200 }),
+  pub({ name: 'minimax-xlsx', description: 'Excel 表格创建、分析与校验', tags: [], managed: true, source: 'MiniMax-AI/skills', hash: 'a2b3c4d5', fileCount: 25, sizeBytes: 72800 }),
+  pub({ name: 'plan-execute', description: '复杂开发任务先写计划再执行', tags: [], managed: false, source: null, hash: 'b3c4d5e6', fileCount: 19, sizeBytes: 48600 }),
+  pub({ name: 'pptx-generator', description: 'PowerPoint 演示文稿生成与编辑', tags: [], managed: true, source: 'MiniMax-AI/skills', hash: 'c4d5e6f7', fileCount: 6, sizeBytes: 21400 }),
+  pub({ name: 'project-docs-architecture', description: '编写系统架构与组件文档', tags: ['文档'], managed: false, source: null, hash: 'd5e6f7a8', fileCount: 5, sizeBytes: 15200 }),
+  pub({ name: 'project-docs-readme', description: '编写项目 README', tags: ['文档'], managed: false, source: null, hash: 'e6f7a8b9', fileCount: 4, sizeBytes: 11800 }),
+  pub({ name: 'ui-design', description: '界面偏好：文案、层级、主题与本地化', tags: ['UI设计'], managed: false, source: null, hash: 'f7a8b9c0', fileCount: 7, sizeBytes: 22600 }),
+  // 专用 skill：本体在 skills-mapping-cursor，只有 cursor 能读
+  {
+    name: 'issue-scoper',
+    description: '问题定位与需求澄清工作流。用户提出功能或 bug 但没指明代码位置时派出 subagent 定位',
+    tags: ['工作流'],
+    managed: false,
+    source: null,
+    hash: '1a2b3c4d',
+    fileCount: 5,
+    sizeBytes: 16400,
+    agents: ['cursor'],
+    storePath: '~/.agents/skills-mapping-cursor/issue-scoper',
+    linkState: 'ok',
+  },
+  {
+    name: 'utf8-files',
+    description: '在本机写和改文本文件，避免中文被存成 GBK。含配套 MCP 服务 read_utf8/write_utf8',
+    tags: ['工具'],
+    managed: false,
+    source: null,
+    hash: '2b3c4d5e',
+    fileCount: 4,
+    sizeBytes: 12800,
+    agents: ['cursor'],
+    storePath: '~/.agents/skills-mapping-cursor/utf8-files',
+    linkState: 'ok',
+  },
 ];
 
 /** 散落在各 agent 目录里的 skill，照抄实测结果。 */
 const orphans: OrphanSkill[] = [
-  { name: 'analyze', location: '.config/opencode/skills', path: 'C:\\Users\\leaf\\.config\\opencode\\skills\\analyze', relation: 'unique', description: '分析代码结构并给出改进建议', fileCount: 4, sizeBytes: 12400, hash: 'a1b2c3d4' },
-  { name: 'context-archive', location: '.config/opencode/skills', path: 'C:\\Users\\leaf\\.config\\opencode\\skills\\context-archive', relation: 'unique', description: '把长对话归档成结构化笔记', fileCount: 6, sizeBytes: 18600, hash: 'b2c3d4e5' },
-  { name: 'dingtalk-req-to-spec', location: '.cursor/skills', path: 'C:\\Users\\leaf\\.cursor\\skills\\dingtalk-req-to-spec', relation: 'unique', description: '把钉钉需求消息整理成技术规格', fileCount: 11, sizeBytes: 42300, hash: 'c3d4e5f6' },
-  { name: 'hardcoded-page-portal-config', location: '.cursor/skills', path: 'C:\\Users\\leaf\\.cursor\\skills\\hardcoded-page-portal-config', relation: 'unique', description: '页面写死配置的迁移说明', fileCount: 3, sizeBytes: 9800, hash: 'd4e5f6a7' },
-  { name: 'portal-link-migrate', location: '.cursor/skills', path: 'C:\\Users\\leaf\\.cursor\\skills\\portal-link-migrate', relation: 'unique', description: '门户链接批量迁移脚本与步骤', fileCount: 7, sizeBytes: 26800, hash: 'e5f6a7b8' },
-  { name: 'plan-execute', location: '.workbuddy/skills', path: 'C:\\Users\\leaf\\.workbuddy\\skills\\plan-execute', relation: 'identical', description: '复杂开发任务先写计划再执行', fileCount: 19, sizeBytes: 48600, hash: 'b3c4d5e6' },
-  { name: 'agent-browser', location: '.claude/skills', path: 'C:\\Users\\leaf\\.claude\\skills\\agent-browser', relation: 'identical', description: '浏览器自动化 CLI，用于点击、填表、截图、提取页面数据', fileCount: 3, sizeBytes: 8420, hash: '82def678' },
-  { name: 'agent-browser', location: '.codebuddy/skills', path: 'C:\\Users\\leaf\\.codebuddy\\skills\\agent-browser', relation: 'conflict', description: '浏览器自动化 CLI（本地改过，多了自建的截图流程）', fileCount: 5, sizeBytes: 11200, hash: '9f8e7d6c' },
-  { name: 'legacy-review', location: '.gemini/skills', path: 'C:\\Users\\leaf\\.gemini\\skills\\legacy-review', relation: 'broken-link', description: '', fileCount: 0, sizeBytes: 0, hash: '' },
+  { name: 'analyze', location: '.config/opencode/skills', agent: 'opencode', path: 'C:\\Users\\leaf\\.config\\opencode\\skills\\analyze', relation: 'unique', description: '分析代码结构并给出改进建议', fileCount: 4, sizeBytes: 12400, hash: 'a1b2c3d4' },
+  { name: 'context-archive', location: '.config/opencode/skills', agent: 'opencode', path: 'C:\\Users\\leaf\\.config\\opencode\\skills\\context-archive', relation: 'unique', description: '把长对话归档成结构化笔记', fileCount: 6, sizeBytes: 18600, hash: 'b2c3d4e5' },
+  { name: 'dingtalk-req-to-spec', location: '.cursor/skills', agent: 'cursor', path: 'C:\\Users\\leaf\\.cursor\\skills\\dingtalk-req-to-spec', relation: 'unique', description: '把钉钉需求消息整理成技术规格', fileCount: 11, sizeBytes: 42300, hash: 'c3d4e5f6' },
+  { name: 'hardcoded-page-portal-config', location: '.cursor/skills', agent: 'cursor', path: 'C:\\Users\\leaf\\.cursor\\skills\\hardcoded-page-portal-config', relation: 'unique', description: '页面写死配置的迁移说明', fileCount: 3, sizeBytes: 9800, hash: 'd4e5f6a7' },
+  { name: 'portal-link-migrate', location: '.cursor/skills', agent: 'cursor', path: 'C:\\Users\\leaf\\.cursor\\skills\\portal-link-migrate', relation: 'unique', description: '门户链接批量迁移脚本与步骤', fileCount: 7, sizeBytes: 26800, hash: 'e5f6a7b8' },
+  { name: 'plan-execute', location: '.workbuddy/skills', agent: 'workbuddy', path: 'C:\\Users\\leaf\\.workbuddy\\skills\\plan-execute', relation: 'identical', description: '复杂开发任务先写计划再执行', fileCount: 19, sizeBytes: 48600, hash: 'b3c4d5e6' },
+  { name: 'agent-browser', location: '.claude/skills', agent: 'claude', path: 'C:\\Users\\leaf\\.claude\\skills\\agent-browser', relation: 'identical', description: '浏览器自动化 CLI，用于点击、填表、截图、提取页面数据', fileCount: 3, sizeBytes: 8420, hash: '82def678' },
+  { name: 'agent-browser', location: '.codebuddy/skills', agent: 'codebuddy', path: 'C:\\Users\\leaf\\.codebuddy\\skills\\agent-browser', relation: 'conflict', description: '浏览器自动化 CLI（本地改过，多了自建的截图流程）', fileCount: 5, sizeBytes: 11200, hash: '9f8e7d6c' },
+  { name: 'legacy-review', location: '.gemini/skills', agent: 'gemini', path: 'C:\\Users\\leaf\\.gemini\\skills\\legacy-review', relation: 'broken-link', description: '', fileCount: 0, sizeBytes: 0, hash: '' },
+];
+
+/** 专用 skill 记录，对应上面 skills 里那两条 agents 非空的样例。 */
+const skillMappings: SkillMappingView[] = [
+  {
+    skill: 'issue-scoper',
+    agents: ['cursor'],
+    storePath: '~/.agents/skills-mapping-cursor/issue-scoper',
+    storeExists: true,
+    links: [
+      {
+        agent: 'cursor',
+        label: 'Cursor',
+        path: '~/.cursor/skills/issue-scoper',
+        state: 'ok',
+        actual: 'junction',
+        note: null,
+      },
+    ],
+    state: 'ok',
+    mode: 'auto',
+  },
+  {
+    skill: 'utf8-files',
+    agents: ['cursor'],
+    storePath: '~/.agents/skills-mapping-cursor/utf8-files',
+    storeExists: true,
+    links: [
+      {
+        agent: 'cursor',
+        label: 'Cursor',
+        path: '~/.cursor/skills/utf8-files',
+        state: 'ok',
+        actual: 'junction',
+        note: null,
+      },
+    ],
+    state: 'ok',
+    mode: 'auto',
+  },
 ];
 
 /** 受管 skill 的 lock 信息。 */
@@ -179,6 +258,159 @@ const gitStatus: GitStatus = {
   changed: [],
   remote: 'git@github.com:yinwenyuan28-afk/.agents.git',
 };
+
+/**
+ * 每个 agent 的指令文档现状。
+ *
+ * 只给 cursor 造了一份额外片段（子代理模型那个真实场景），
+ * 其余 agent 都直接读通用母版 —— 和真机上的默认状态一致。
+ */
+const agentDocs: AgentDoc[] = [
+  {
+    agent: 'claude',
+    label: 'Claude Code',
+    commonPath: '~/.agents/AGENTS.md',
+    target: '~/.claude/CLAUDE.md',
+    specificPath: '~/.agents/AGENTS.d/claude.md',
+    specificExists: false,
+    composedPath: null,
+    composedStale: false,
+    bytes: 5820,
+    installed: true,
+  },
+  {
+    agent: 'codex',
+    label: 'Codex',
+    commonPath: '~/.agents/AGENTS.md',
+    target: '~/.codex/AGENTS.md',
+    specificPath: '~/.agents/AGENTS.d/codex.md',
+    specificExists: false,
+    composedPath: null,
+    composedStale: false,
+    bytes: 5820,
+    installed: true,
+  },
+  {
+    agent: 'zcode',
+    label: 'ZCode',
+    commonPath: '~/.agents/AGENTS.md',
+    target: '~/.zcode/AGENTS.md',
+    specificPath: '~/.agents/AGENTS.d/zcode.md',
+    specificExists: false,
+    composedPath: null,
+    composedStale: false,
+    bytes: 5820,
+    installed: true,
+  },
+  {
+    agent: 'pi',
+    label: 'Pi',
+    commonPath: '~/.agents/AGENTS.md',
+    target: '~/.pi/agent/AGENTS.md',
+    specificPath: '~/.agents/AGENTS.d/pi.md',
+    specificExists: false,
+    composedPath: null,
+    composedStale: false,
+    bytes: 5820,
+    installed: true,
+  },
+  {
+    agent: 'opencode',
+    label: 'OpenCode',
+    commonPath: '~/.agents/AGENTS.md',
+    target: '~/.config/opencode/AGENTS.md',
+    specificPath: '~/.agents/AGENTS.d/opencode.md',
+    specificExists: false,
+    composedPath: null,
+    composedStale: false,
+    bytes: 5820,
+    installed: true,
+  },
+  {
+    agent: 'dsh',
+    label: 'DSH',
+    commonPath: '~/.agents/AGENTS.md',
+    target: '~/.dsh/AGENTS.md',
+    specificPath: '~/.agents/AGENTS.d/dsh.md',
+    specificExists: false,
+    composedPath: null,
+    composedStale: false,
+    bytes: 5820,
+    installed: true,
+  },
+  {
+    agent: 'cursor',
+    label: 'Cursor',
+    commonPath: '~/.agents/AGENTS.md',
+    target: '~/.cursor/AGENTS.md',
+    specificPath: '~/.agents/AGENTS.d/cursor.md',
+    specificExists: true,
+    composedPath: '~/.agents/composed/cursor.md',
+    composedStale: true,
+    bytes: 6340,
+    installed: true,
+  },
+  {
+    agent: 'qoder-cn',
+    label: 'Qoder CN',
+    commonPath: '~/.agents/AGENTS.md',
+    target: '~/.qoder-cn/AGENTS.md',
+    specificPath: '~/.agents/AGENTS.d/qoder-cn.md',
+    specificExists: false,
+    composedPath: null,
+    composedStale: false,
+    bytes: 5820,
+    installed: false,
+  },
+  {
+    agent: 'trae-cn',
+    label: 'Trae CN',
+    commonPath: '~/.agents/AGENTS.md',
+    target: '~/.trae-cn/AGENTS.md',
+    specificPath: '~/.agents/AGENTS.d/trae-cn.md',
+    specificExists: false,
+    composedPath: null,
+    composedStale: false,
+    bytes: 5820,
+    installed: false,
+  },
+  {
+    agent: 'zed',
+    label: 'Zed',
+    commonPath: '~/.agents/AGENTS.md',
+    target: '%APPDATA%/Zed/AGENTS.md',
+    specificPath: '~/.agents/AGENTS.d/zed.md',
+    specificExists: false,
+    composedPath: null,
+    composedStale: false,
+    bytes: 5820,
+    installed: false,
+  },
+  {
+    agent: 'gemini',
+    label: 'Gemini CLI',
+    commonPath: '~/.agents/AGENTS.md',
+    target: '~/.gemini/AGENTS.md',
+    specificPath: '~/.agents/AGENTS.d/gemini.md',
+    specificExists: false,
+    composedPath: null,
+    composedStale: false,
+    bytes: 5820,
+    installed: false,
+  },
+];
+
+/** cursor 的专用片段内容，对应「省开销」那个真实场景。 */
+const cursorSpecific = `## 子代理模型选择
+
+派 subagent 时按任务复杂度选模型，别一律用最贵的：
+
+- 简单检索、单文件改动 → \`glm-5.3-flash\`
+- 多步推理、跨文件重构 → \`gpt-6 luna\`
+- 不确定时先派 flash 试，失败再升级
+
+这么做的原因是子代理通常只做一次性的小任务，用旗舰模型跑一遍
+开销是 flash 的十几倍，而结果差别不大。`;
 
 const ok = (output: string): RunResult => ({ ok: true, exitCode: 0, output });
 
@@ -436,6 +668,46 @@ export async function handle(command: string, args?: Record<string, unknown>): P
     case 'create_doc':
       return ok('已创建母版文件');
 
+    case 'list_agent_docs':
+      return agentDocs;
+
+    case 'read_agent_doc': {
+      const agent = String(args?.agent ?? '');
+      const d = agentDocs.find((x) => x.agent === agent);
+      if (d?.specificExists && agent === 'cursor') {
+        return { exists: true, content: cursorSpecific };
+      }
+      return { exists: false, content: '' };
+    }
+
+    case 'save_agent_doc': {
+      const agent = String(args?.agent ?? '');
+      const content = String(args?.content ?? '');
+      const d = agentDocs.find((x) => x.agent === agent);
+      if (!d) return { ok: false, exitCode: 1, output: `不认识的 agent：${agent}` };
+
+      const empty = content.trim() === '';
+      d.specificExists = !empty;
+      d.composedPath = empty ? null : `~/.agents/composed/${agent}.md`;
+      d.composedStale = !empty;
+      return ok(
+        empty
+          ? `已取消 ${agent} 的专用片段；下次同步会改用通用母版`
+          : `已保存专用片段 ${agent}（${content.length} 字节）`,
+      );
+    }
+
+    case 'compose_agent_docs': {
+      const dryRun = Boolean(args?.dryRun);
+      const stale = agentDocs.filter((d) => d.composedStale);
+      if (stale.length === 0) return ok('没有需要合成的文档');
+      if (dryRun) {
+        return ok(stale.map((d) => `[skipped] ${d.agent}：内容有变化，待重建`).join('\n'));
+      }
+      for (const d of stale) d.composedStale = false;
+      return ok(stale.map((d) => `[updated] ${d.agent}：已更新 ${d.composedPath}`).join('\n'));
+    }
+
     case 'list_skills':
       return skills;
 
@@ -461,10 +733,16 @@ export async function handle(command: string, args?: Record<string, unknown>): P
       const action = String(args?.action ?? '') as OrphanAction;
       const idx = orphans.findIndex((o) => o.path === path);
       const name = idx >= 0 ? orphans[idx].name : path;
+      const agent = idx >= 0 ? (orphans[idx].agent ?? '') : '';
+      const sizeBytes = idx >= 0 ? orphans[idx].sizeBytes : 0;
+      const fileCount = idx >= 0 ? orphans[idx].fileCount : 0;
+      const hash = idx >= 0 ? orphans[idx].hash : '';
+      const description = idx >= 0 ? orphans[idx].description : '';
       if (idx >= 0) orphans.splice(idx, 1);
 
       const messages: Record<OrphanAction, string> = {
         import: '已移入中心库，原位置建立 Hardlink',
+        privatize: `已移入专用库 ~/.agents/skills-mapping-${agent}，仅 ${agent} 可见；原位置建立 Junction`,
         dedupe: '已删除散落副本，原位置建立 Hardlink 指向中心库',
         'take-orphan': '已用散落版替换中心库；旧版备份在 ~/.agents/backup/；原位置建立 Hardlink',
         'take-shared': '已采用中心库那份，散落副本删除，原位置建立 Hardlink',
@@ -472,7 +750,79 @@ export async function handle(command: string, args?: Record<string, unknown>): P
         'remove-link': '已删除坏链接',
       };
 
+      // privatize 在预览里同步更新两张表，让界面看到效果和真机一致：
+      // 中心库多一条 agents 非空的，专用管理区多一行
+      if (action === 'privatize' && agent) {
+        skills.push({
+          name,
+          description,
+          tags: [],
+          managed: false,
+          source: null,
+          hash,
+          fileCount,
+          sizeBytes,
+          agents: [agent],
+          storePath: `~/.agents/skills-mapping-${agent}/${name}`,
+          linkState: 'ok',
+        });
+        skills.sort((a, b) => a.name.localeCompare(b.name));
+        skillMappings.push({
+          skill: name,
+          agents: [agent],
+          storePath: `~/.agents/skills-mapping-${agent}/${name}`,
+          storeExists: true,
+          links: [
+            {
+              agent,
+              label: agent,
+              path: path,
+              state: 'ok',
+              actual: 'junction',
+              note: null,
+            },
+          ],
+          state: 'ok',
+          mode: 'auto',
+        });
+      }
+
       return { name, path, action, ok: true, message: messages[action] ?? '已处理' };
+    }
+
+    case 'list_skill_mappings':
+      return skillMappings;
+
+    case 'sync_skill_mappings': {
+      const dryRun = Boolean(args?.dryRun);
+      return skillMappings.map((m) =>
+        dryRun
+          ? `[最新] ${m.skill} → ${m.agents[0] ?? '?'} 已是最新，跳过`
+          : `[最新] ${m.skill} → ${m.agents[0] ?? '?'} 已是最新，跳过`,
+      );
+    }
+
+    case 'remove_skill_mapping': {
+      const skill = String(args?.skill ?? '');
+      const toShared = Boolean(args?.toShared);
+      const i = skillMappings.findIndex((m) => m.skill === skill);
+      if (i >= 0) skillMappings.splice(i, 1);
+      // 中心库那条记录的 agents 清空，等于变回公共 skill
+      const s = skills.find((x) => x.name === skill);
+      if (s) {
+        if (toShared) {
+          s.agents = [];
+          s.storePath = null;
+          s.linkState = 'ok';
+        } else {
+          skills.splice(skills.indexOf(s), 1);
+        }
+      }
+      return ok(
+        toShared
+          ? `已取消 ${skill} 的专用：本体已移入公共库`
+          : `已取消 ${skill} 的专用：本体已备份到 ~/.agents/backup/ 后删除`,
+      );
     }
 
     case 'list_managed':
@@ -550,6 +900,8 @@ export async function handle(command: string, args?: Record<string, unknown>): P
             default: 'deepseek/deepseek-v4.1-flash',
           },
           note: '2026-11-10 从控制台获取',
+          // 预览模式的假 key：只用于让编辑框显示明文，不指向任何真实服务
+          apiKey: 'sk-mock-command-preview-0000000000000000000000000000000000000000000000',
           keyLen: 93,
           keyTail: 'JGNt',
         },
@@ -575,6 +927,7 @@ export async function handle(command: string, args?: Record<string, unknown>): P
           agents: ['zcode', 'pi'],
           claudeModelMap: {},
           note: '',
+          apiKey: 'sk-mock-minimax-cn-preview',
           keyLen: 125,
           keyTail: 'I3v0',
         },
@@ -591,6 +944,7 @@ export async function handle(command: string, args?: Record<string, unknown>): P
           agents: ['dsh', 'workbuddy'],
           claudeModelMap: {},
           note: '验证 Responses 协议',
+          apiKey: 'sk-mock-dsh-responses-preview',
           keyLen: 40,
           keyTail: 'abcd',
         },
@@ -688,6 +1042,7 @@ export async function handle(command: string, args?: Record<string, unknown>): P
               default: 'deepseek/deepseek-v4.1-flash',
             },
             note: '2026-11-10 从控制台获取',
+            apiKey: 'sk-mock-command-preview-0000000000000000000000000000000000000000000000',
             keyLen: 93,
             keyTail: 'JGNt',
           },
@@ -712,6 +1067,7 @@ export async function handle(command: string, args?: Record<string, unknown>): P
             agents: ['zcode', 'pi'],
             claudeModelMap: {},
             note: '',
+            apiKey: 'sk-mock-minimax-cn-preview',
             keyLen: 125,
             keyTail: 'I3v0',
           },
@@ -729,6 +1085,7 @@ export async function handle(command: string, args?: Record<string, unknown>): P
             agents: ['workbuddy'],
             claudeModelMap: {},
             note: '验证 Responses 协议',
+            apiKey: 'sk-mock-dsh-responses-preview',
             keyLen: 40,
             keyTail: 'abcd',
           },

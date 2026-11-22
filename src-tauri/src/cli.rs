@@ -136,7 +136,8 @@ pub enum SkillsCmd {
         path: Option<String>,
 
         /// 处置动作：
-        /// import（移入中心库）/ dedupe（删副本改链接）/
+        /// import（移入中心库）/ privatize（标记为当前 agent 专用）/
+        /// dedupe（删副本改链接）/
         /// take-orphan（采用散落版）/ take-shared（采用中心库版）/
         /// delete（只删不建链接）/ remove-link（删坏链接）
         #[arg(long)]
@@ -156,6 +157,16 @@ pub enum SkillsCmd {
         add: Vec<String>,
     },
 
+    /// 管理「只给某几个 agent 用」的专用 skill
+    ///
+    /// 专用 skill 的本体放在 `~/.agents/skills-mapping-<agent>/`，
+    /// 不进公共库 `~/.agents/skills` —— 否则所有 agent 都会读到它。
+    /// agent 目录里放一个指向本体的链接，它照常能读。
+    Private {
+        #[command(subcommand)]
+        cmd: SkillsPrivateCmd,
+    },
+
     /// 检查第三方 skill 更新
     Check,
 
@@ -163,6 +174,46 @@ pub enum SkillsCmd {
     Update {
         /// 指定 skill 名，不传则全部
         names: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillsPrivateCmd {
+    /// 列出全部专用 skill 记录及链接状态
+    List,
+
+    /// 把一个 skill 标记为某个 agent 专用
+    ///
+    /// 从 agent 自己的 skills 目录或公共库里取本体，移进
+    /// `~/.agents/skills-mapping-<agent>/`，原位置建链接并写记录。
+    Add {
+        /// skill 名
+        skill: String,
+
+        /// 归属哪个 agent，可重复传多个。
+        /// 第一个 agent 的专用库目录存放本体
+        #[arg(long = "agent", required = true)]
+        agents: Vec<String>,
+    },
+
+    /// 重建专用 skill 的链接
+    ///
+    /// 幂等：已经是对的链接直接跳过。链接断了、agent 重装后丢失时用它。
+    Sync {
+        /// 只报告会做什么，不动磁盘
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// 取消专用，把 skill 移回公共库或删掉
+    Remove {
+        /// skill 名
+        skill: String,
+
+        /// 移回公共库 `~/.agents/skills`，变成所有 agent 都能用。
+        /// 不加这个参数则先备份到 ~/.agents/backup/ 再删除
+        #[arg(long)]
+        to_shared: bool,
     },
 }
 
@@ -331,6 +382,40 @@ pub enum DocCmd {
 
     /// 显示母版路径和是否存在
     Path,
+
+    /// 列出每个 agent 的专用片段与合成状态
+    ///
+    /// 有专用片段的 agent 读的是「通用 + 专用」的合成产物，
+    /// 没有的仍直接读通用母版。
+    List,
+
+    /// 读或写某个 agent 的专用片段
+    ///
+    /// 不带 `--file` 时打印当前内容；带 `--file` 时写入覆盖。
+    /// 传空内容（空文件或 `--clear`）表示取消这个 agent 的专用片段，
+    /// 之后它回到直接读通用母版。
+    Specific {
+        /// agent 标识，如 cursor / zcode
+        agent: String,
+
+        /// 从这个文件读取内容写入。省略则打印当前内容
+        #[arg(long)]
+        file: Option<String>,
+
+        /// 清空这个 agent 的专用片段（等于只看通用母版）
+        #[arg(long)]
+        clear: bool,
+    },
+
+    /// 重建所有 agent 的合成指令文档
+    ///
+    /// `sync` 内部也会先跑一遍这个，一般不需要单独执行。
+    /// 用 `--dry-run` 看哪些合成文件落后了。
+    Compose {
+        /// 只报告，不写盘
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Claude 本地协议转换端口的控制。

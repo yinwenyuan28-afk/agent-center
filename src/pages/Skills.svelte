@@ -6,9 +6,24 @@
    * 一旦目录内被改动，下次 update 就会冲突。
    */
   import { onMount } from 'svelte';
-  import { Search, Plus, X, RefreshCw, FolderInput } from '@lucide/svelte';
-  import { applyOrphanAction, collectSkills, listSkills, scanOrphans, setSkillTags } from '../lib/ipc';
-  import type { OrphanAction, OrphanActionResult, OrphanSkill, Skill } from '../lib/types';
+  import { Search, Plus, X, RefreshCw, FolderInput, Link2, Lock } from '@lucide/svelte';
+  import {
+    applyOrphanAction,
+    collectSkills,
+    listSkillMappings,
+    listSkills,
+    removeSkillMapping,
+    scanOrphans,
+    setSkillTags,
+    syncSkillMappings,
+  } from '../lib/ipc';
+  import type {
+    OrphanAction,
+    OrphanActionResult,
+    OrphanSkill,
+    Skill,
+    SkillMappingView,
+  } from '../lib/types';
   import PageHead from '../lib/components/PageHead.svelte';
   import Button from '../lib/components/Button.svelte';
   import Badge from '../lib/components/Badge.svelte';
@@ -17,12 +32,16 @@
 
   let skills = $state<Skill[]>([]);
   let orphans = $state<OrphanSkill[]>([]);
+  /** 专用 skill 记录。和 `skills` 里的专用项是同一批东西的两种视角。 */
+  let privates = $state<SkillMappingView[]>([]);
   let loading = $state(true);
   let filter = $state('');
   /** 标签筛选。'__untagged__' 是特殊值，表示只看没有标签的。 */
   let activeTag = $state<string | null>(null);
   /** 来源筛选：all 全部 / third 第三方受管 / local 本地自建。 */
   let origin = $state<'all' | 'third' | 'local'>('all');
+  /** 范围筛选：all 全部 / public 公共 / private 专用。 */
+  let scope = $state<'all' | 'public' | 'private'>('all');
   let log = $state('');
   let editing = $state<string | null>(null);
   let draftTag = $state('');
@@ -36,6 +55,12 @@
   let orphanResults = $state<OrphanActionResult[]>([]);
   /** 一键处理（按关系套固定策略）是否在执行。 */
   let collecting = $state(false);
+
+  // ---- 专用 skill 管理 ----
+  /** 正在同步链接。 */
+  let syncing = $state(false);
+  /** 正在取消的那一条。 */
+  let removing = $state<string | null>(null);
 
   /** 未分类的哨兵值。用不可能出现在真实标签里的字符串，避免与用户标签撞名。 */
   const UNTAGGED = '__untagged__';
@@ -52,9 +77,15 @@
   /** 没有任何标签的 skill 数量，用于决定「未分类」筛选项是否显示。 */
   const untaggedCount = $derived(skills.filter((s) => s.tags.length === 0).length);
 
+  /** 专用 skill 数量，用于决定「专用」筛选项是否显示。 */
+  const privateCount = $derived(skills.filter((s) => s.agents.length > 0).length);
+
   const shown = $derived.by(() => {
     const q = filter.trim().toLowerCase();
     return skills.filter((s) => {
+      // 范围筛选
+      if (scope === 'public' && s.agents.length > 0) return false;
+      if (scope === 'private' && s.agents.length === 0) return false;
       // 来源筛选
       if (origin === 'third' && !s.managed) return false;
       if (origin === 'local' && s.managed) return false;
@@ -75,6 +106,7 @@
     try {
       skills = await listSkills();
       orphans = await scanOrphans();
+      privates = await listSkillMappings();
     } catch (e) {
       log = `读取失败：${e instanceof Error ? e.message : String(e)}`;
     } finally {
@@ -194,8 +226,9 @@
       if (r.ok) {
         // 成功后立刻从清单里移除，不用整表重扫
         orphans = orphans.filter((x) => x.path !== o.path);
-        // 移入中心库会让中心库多一条，主列表要跟着变
+        // 移入中心库 / 标记专用都会让中心库和专用记录多一条，两张表都要刷新
         skills = await listSkills();
+        if (action === 'privatize') privates = await listSkillMappings();
       }
     } catch (e) {
       orphanResults = [
@@ -231,21 +264,32 @@
   }
 
   /** 每种关系可用的处置按钮。delete 在所有关系里都可用。 */
-  function actionsFor(rel: OrphanSkill['relation']): {
+  function actionsFor(o: OrphanSkill): {
     action: OrphanAction;
     label: string;
     hint: string;
     variant: 'primary' | 'outline' | 'ghost' | 'danger';
   }[] {
-    switch (rel) {
+    switch (o.relation) {
       case 'unique':
         return [
           {
             action: 'import',
             label: '移入中心库',
-            hint: '搬进 ~/.agents/skills，原位置建链接，这个 agent 仍能读到',
+            hint: '搬进 ~/.agents/skills，原位置建链接，所有 agent 都能读到',
             variant: 'primary',
           },
+          // 只有知道属于哪个 agent 才能标记专用 —— 专用库按 agent 分目录
+          ...(o.agent
+            ? [
+                {
+                  action: 'privatize' as OrphanAction,
+                  label: `标记为 ${o.agent} 专用`,
+                  hint: `搬进 ~/.agents/skills-mapping-${o.agent}，不进公共库，只有 ${o.agent} 能读到；原位置建链接`,
+                  variant: 'outline' as const,
+                },
+              ]
+            : []),
           {
             action: 'delete',
             label: '删除',
@@ -306,7 +350,15 @@
     const where = `${o.location} 下的 ${o.name}`;
     switch (action) {
       case 'import':
-        return `把 ${where} 移入中心库？\n\n原位置会建一个指向中心库的链接，${o.location.split('/')[1] ?? '该 agent'} 仍然能读到这个 skill。`;
+        return `把 ${where} 移入中心库？\n\n原位置会建一个指向中心库的链接，${o.location.split('/')[1] ?? '该 agent'} 仍然能读到这个 skill，所有 agent 都能读到。`;
+      case 'privatize':
+        return (
+          `把 ${where} 标记为 ${o.agent} 专用？\n\n` +
+          `· 本体移到 ~/.agents/skills-mapping-${o.agent}/${o.name}\n` +
+          `· 不进公共库，别的 agent 看不到它\n` +
+          `· 原位置建链接，${o.agent} 照常能读\n` +
+          `· 会记一条归属记录，以后可以「修复链接」或取消`
+        );
       case 'dedupe':
         return `删掉 ${where} 这份副本，改建成指向中心库的链接？\n\n内容与中心库完全相同，不会丢东西。`;
       case 'take-orphan':
@@ -320,6 +372,42 @@
     }
   }
 
+  /** 重建全部专用 skill 的链接。幂等：正常的不动。 */
+  async function runSyncPrivates() {
+    syncing = true;
+    try {
+      const lines = await syncSkillMappings(false);
+      log = lines.join('\n');
+      await load();
+    } catch (e) {
+      log = `修复链接失败：${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      syncing = false;
+    }
+  }
+
+  /** 取消一条专用记录。toShared 决定本体是回公共库还是备份后删掉。 */
+  async function cancelPrivate(m: SkillMappingView, toShared: boolean) {
+    const where = `${m.skill}（${m.agents.join('、')} 专用）`;
+    const ok = confirm(
+      toShared
+        ? `取消 ${where} 的专用？\n\n· 各 agent 目录里的链接会删掉\n· 本体移进公共库 ~/.agents/skills，之后所有 agent 都能读到`
+        : `取消 ${where} 的专用？\n\n· 各 agent 目录里的链接会删掉\n· 本体先复制到 ~/.agents/backup/，然后删除\n· 这个删除不进 git，删了要从备份里找回来`,
+    );
+    if (!ok) return;
+
+    removing = m.skill;
+    try {
+      const r = await removeSkillMapping(m.skill, toShared);
+      log = r.output;
+      await load();
+    } catch (e) {
+      log = `取消失败：${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      removing = null;
+    }
+  }
+
   function kb(n: number): string {
     return n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`;
   }
@@ -327,9 +415,7 @@
   onMount(load);
 </script>
 
-<PageHead title="Skills">
-  中心库 <code class="font-[var(--font-mono)] text-[12px]">~/.agents/skills</code> 里的全部 skill。标签只记录在配置里，不改动 skill 目录本身。
-</PageHead>
+<PageHead title="Skills" />
 
 <div class="mb-3 flex flex-wrap items-center gap-2">
   <div class="relative">
@@ -404,6 +490,24 @@
   </div>
 {/if}
 
+<!-- 范围筛选：公共（所有 agent 都能读）/ 专用（只有指定的那几只能读） -->
+<div class="mb-2 flex flex-wrap items-center gap-1.5">
+  <span class="mr-1 text-[11px] text-[var(--color-text-faint)]">范围</span>
+  {#each [['all', '全部'], ['public', '公共'], ['private', `专用 ${privateCount}`]] as const as [val, label] (val)}
+    <button
+      class={cn(
+        'rounded-full px-2.5 py-0.5 text-[11px] transition-colors',
+        scope === val
+          ? 'bg-[var(--color-text)] text-[var(--color-bg)]'
+          : 'bg-[var(--color-bg-muted)] text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)]',
+      )}
+      onclick={() => (scope = val)}
+    >
+      {label}
+    </button>
+  {/each}
+</div>
+
 <!-- 来源筛选：区分 npx skills 装的第三方和自己写的 -->
 <div class="mb-4 flex flex-wrap items-center gap-1.5">
   <span class="mr-1 text-[11px] text-[var(--color-text-faint)]">来源</span>
@@ -439,10 +543,11 @@
         <tr
           class="border-b border-[var(--color-border)] text-left text-[11px] uppercase tracking-wider text-[var(--color-text-faint)]"
         >
-          <th class="w-[18%] px-4 py-2.5 font-medium">名称</th>
-          <th class="w-[30%] px-4 py-2.5 font-medium">说明</th>
-          <th class="w-[24%] px-4 py-2.5 font-medium">标签</th>
-          <th class="w-[14%] px-4 py-2.5 font-medium">来源</th>
+          <th class="w-[17%] px-4 py-2.5 font-medium">名称</th>
+          <th class="w-[9%] px-4 py-2.5 font-medium">范围</th>
+          <th class="w-[27%] px-4 py-2.5 font-medium">说明</th>
+          <th class="w-[20%] px-4 py-2.5 font-medium">标签</th>
+          <th class="w-[13%] px-4 py-2.5 font-medium">来源</th>
           <th class="w-[6%] px-4 py-2.5 text-right font-medium">文件</th>
           <!-- 大小列要给足宽度。"62.2 KB" 在 5% 宽度下会被折成两行，
                而 Windows 上常见大 skill（minimax-docx 1.5MB）需要更多空间 -->
@@ -458,11 +563,29 @@
                 <Badge tone="info" class="ml-1.5">受管</Badge>
               {/if}
             </td>
+            <td class="px-4 py-2.5">
+              {#if s.agents.length > 0}
+                <span
+                  class="inline-flex items-center gap-1 rounded-[var(--radius-sm)] bg-[var(--color-warn-bg)] px-1.5 py-0.5 text-[11px] text-[var(--color-warn)]"
+                  title={s.storePath ? `本体在 ${s.storePath}` : '专用 skill'}
+                >
+                  <Lock size={10} />
+                  {s.agents.join(',')}
+                </span>
+                {#if s.linkState !== 'ok'}
+                  <Badge tone="danger" class="ml-1">
+                    {s.linkState === 'broken' ? '断链' : '缺失'}
+                  </Badge>
+                {/if}
+              {:else}
+                <span class="text-[11px] text-[var(--color-text-faint)]">公共</span>
+              {/if}
+            </td>
             <td class="px-4 py-2.5 text-[var(--color-text-muted)]">
               <!-- 描述最长有 900 多字符，必须截断。两行截断 + 悬停看全文。
                    长英文单词不含空格时也要能断行，否则会把列撑宽。 -->
               <div
-                class="line-clamp-2 max-w-[36ch] break-words text-[12px] leading-snug"
+                class="line-clamp-2 max-w-[32ch] break-words text-[12px] leading-snug"
                 title={s.description}
               >
                 {s.description || '—'}
@@ -530,6 +653,85 @@
   {/if}
 {/if}
 
+<!-- 专用 skill 管理：本体在 ~/.agents/skills-mapping-<agent>，agent 目录里靠链接读回来。
+     链接一断 agent 就悄悄读不到，所以这块的重点是状态可见 + 一键重建。 -->
+{#if privates.length > 0}
+  <div class="mt-6">
+    <div class="mb-2 flex flex-wrap items-center gap-2">
+      <h2 class="text-[13px] font-semibold text-[var(--color-text)]">专用 skill</h2>
+      <span class="text-[11px] text-[var(--color-text-faint)]">
+        只给指定 agent 用，不进公共库；agent 目录里是链接
+      </span>
+      <span class="flex-1"></span>
+      <Button size="sm" variant="ghost" onclick={runSyncPrivates} disabled={syncing}>
+        <Link2 size={13} />
+        {syncing ? '修复中…' : '修复链接'}
+      </Button>
+    </div>
+
+    <div class="flex flex-col gap-2">
+      {#each privates as m (m.skill)}
+        {@const stateBadge =
+          m.state === 'ok'
+            ? { text: '正常', tone: 'ok' as const }
+            : m.state === 'broken'
+              ? { text: '断链', tone: 'danger' as const }
+              : { text: '缺失', tone: 'warn' as const }}
+        <div class="rounded-[var(--radius-md)] border border-[var(--color-border)] p-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="font-[var(--font-mono)] text-[13px] text-[var(--color-text)]">{m.skill}</span>
+            <Badge tone="plain">{m.agents.join(', ')}</Badge>
+            <Badge tone={stateBadge.tone}>{stateBadge.text}</Badge>
+            {#if !m.storeExists}
+              <span class="text-[11px] text-[var(--color-danger)]">本体目录不存在</span>
+            {/if}
+            <span class="flex-1"></span>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={removing !== null}
+              onclick={() => cancelPrivate(m, true)}
+              title="删掉各 agent 的链接，本体移进公共库，之后所有 agent 都能读"
+            >
+              {removing === m.skill ? '处理中…' : '移入公共库'}
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={removing !== null}
+              onclick={() => cancelPrivate(m, false)}
+              title="删掉各 agent 的链接，本体先备份到 ~/.agents/backup/ 再删除"
+            >
+              取消并删除
+            </Button>
+          </div>
+
+          <div
+            class="mt-1 flex flex-col gap-0.5 font-[var(--font-mono)] text-[11px] text-[var(--color-text-muted)]"
+          >
+            <span title={m.storePath}>本体：{m.storePath}</span>
+            {#each m.links as l (l.agent)}
+              <span
+                class={cn(
+                  l.state === 'ok' ? 'text-[var(--color-text-faint)]' : 'text-[var(--color-danger)]',
+                )}
+                title={l.note ?? ''}
+              >
+                {l.label}：{l.path}
+                {#if l.state !== 'ok'}
+                  <span class="ml-1">— {l.note ?? l.state}</span>
+                {:else if l.actual}
+                  <span class="ml-1 opacity-60">({l.actual})</span>
+                {/if}
+              </span>
+            {/each}
+          </div>
+        </div>
+      {/each}
+    </div>
+  </div>
+{/if}
+
 {#if showOrphans}
   <div
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -554,8 +756,10 @@
               散落 skill 处置
             </h2>
             <p class="mt-1 text-[12px] text-[var(--color-text-muted)]">
-              下面这些 skill 躺在各个 agent 自己的目录里，没有收进中心库
-              <code class="font-[var(--font-mono)]">~/.agents/skills</code>。
+              下面这些 skill 躺在各个 agent 自己的目录里。
+              通用的收进中心库 <code class="font-[var(--font-mono)]">~/.agents/skills</code>，
+              只给某一个 agent 用的标成「专用」，它会搬进
+              <code class="font-[var(--font-mono)]">~/.agents/skills-mapping-&lt;agent&gt;</code> 而不进公共库。
               逐条选怎么处理；每个动作都会先问一次再动磁盘。
             </p>
           </div>
@@ -616,7 +820,7 @@
                 {/if}
 
                 <div class="mt-2 flex flex-wrap items-center gap-1.5">
-                  {#each actionsFor(o.relation) as a (a.action)}
+                  {#each actionsFor(o) as a (a.action)}
                     <Button
                       size="sm"
                       variant={a.variant}
