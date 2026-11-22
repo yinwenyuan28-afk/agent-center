@@ -18,7 +18,9 @@ use crate::agents;
 // 列结构定义在 types.rs，和前端契约一一对应
 pub use crate::types::{AgentColumn, ClaudeModelMap, ProviderMatrix, ProviderView};
 
-/// 把一条 provider 转成界面展示结构。key 只给长度和末尾 4 位。
+/// 把一条 provider 转成界面展示结构。
+///
+/// key 原文和长度、末尾都带上：编辑框要显示当前 key，列表页要判断有没有配。
 fn to_view(p: &Provider) -> ProviderView {
     let tail: String = p
         .api_key
@@ -46,6 +48,7 @@ fn to_view(p: &Provider) -> ProviderView {
         codex_requires_openai_auth: p.codex_requires_openai_auth,
         codex_model: p.codex_model.clone(),
         note: p.note.clone(),
+        api_key: p.api_key.clone(),
         key_len: p.api_key.len(),
         key_tail: if p.api_key.len() >= 4 {
             tail

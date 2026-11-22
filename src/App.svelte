@@ -97,7 +97,7 @@
   <div class="flex min-h-0 flex-1">
     <!-- 侧栏 -->
     <nav
-      class="flex w-[224px] shrink-0 flex-col gap-1 border-r border-[var(--color-border)] bg-[var(--color-bg-subtle)] p-3"
+      class="flex w-[224px] shrink-0 flex-col gap-1.5 border-r border-[var(--color-border)] bg-[var(--color-bg-subtle)] p-3"
     >
       <!-- 标题栏里已经有 agentcenter 了，这里不再重复，
            只在浏览器预览时保留一个标识 -->
@@ -148,8 +148,8 @@
                  图标按「是不是叶子」定，不看选中状态：
                  这里的子项都是叶子，所以一律圆点。
                  子项用圆角块 + 互相留缝，避免选中态变成一条直角长条、
-                 也避免上下两项的背景粘在一起。 -->
-            <div class="relative flex flex-col gap-0.5">
+                 也避免上下两项的背景粘在一起。缝留 6px，太近会显得挤。 -->
+            <div class="relative flex flex-col gap-1.5">
               <div class="absolute bottom-1 left-[13px] top-0 w-px bg-[var(--color-border)]"></div>
               {#each page.children as child (child.id)}
                 {@const on = current === child.id}
@@ -219,13 +219,11 @@
       {:else if current === 'store'}
         <Store />
       {:else if current === 'providers'}
-        <!-- 给 Claude / Codex 的特殊配置指路：那些开关在专属设置页 -->
-        <Providers view="provider" onGoClaudeCodex={() => (current = 'claude-codex')} />
+        <Providers view="provider" />
       {:else if current === 'providers-enable'}
         <Providers
           view="agent"
           onGoProviderPool={() => (current = 'providers')}
-          onGoClaudeCodex={() => (current = 'claude-codex')}
         />
       {:else if current === 'claude-codex'}
         <ClaudeCodex />

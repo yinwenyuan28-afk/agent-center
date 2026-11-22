@@ -11,8 +11,8 @@
    * 两边的勾选都只写母版；点「应用到各 agent」（在启用视角的工具栏里）
    * 才真正改各家的配置文件。
    *
-   * 安全设计：key 编辑框留空表示不修改，避免误清空；
-   * 界面上只显示 key 长度和末尾 4 位，原文不跨进程边界。
+   * key 的展示：编辑框显示明文原文（母版本身就是明文，界面也在本机），
+   * 保存时传空串表示不修改现有 key，避免误清空。
    */
   import { onMount } from 'svelte';
   import {
@@ -38,9 +38,13 @@
     writeProvidersToml,
     cursorByokStatus,
     setCodexModel,
+    claudeOnboardingStatus,
+    setClaudeOnboardingSkip,
+    setCodexRequiresOpenaiAuth,
   } from '../lib/ipc';
   import type {
     ClaudeModelMap,
+    ClaudeOnboardingStatus,
     ModelSpec,
     ProviderMatrix,
     ProviderView,
@@ -48,6 +52,8 @@
   import PageHead from '../lib/components/PageHead.svelte';
   import Button from '../lib/components/Button.svelte';
   import Badge from '../lib/components/Badge.svelte';
+  import Switch from '../lib/components/Switch.svelte';
+  import Tip from '../lib/components/Tip.svelte';
   import Log from '../lib/components/Log.svelte';
   import CursorByok from '../lib/components/CursorByok.svelte';
 
@@ -57,17 +63,17 @@
    * `view` 由 App.svelte 根据侧栏选中项传入 —— Provider 拆成两个侧栏子页，
    * 页内不再有自己的切换器，同一个组件按 view 渲染不同内容。
    *
-   * 两个跳转回调也是 App 注入的：它们要改的是侧栏的当前页，组件自己
-   * 改不了。跨到别的页（Claude & Codex）用 onGoClaudeCodex，
-   * 在两个 Provider 子页之间跳用 onGoProviderPool。
+   * `onGoProviderPool` 也是 App 注入的：空池子时「启用 provider」页要
+   * 引导用户去另一个子页新增，这件事只能改侧栏的当前页，组件自己改不了。
+   *
+   * Claude 引导和 Codex 后端开关**不再跳页**，都在本组件里弹窗处理，
+   * 所以没有对应的跳转回调。
    */
   let {
     view = 'provider',
-    onGoClaudeCodex = () => {},
     onGoProviderPool = () => {},
   }: {
     view?: 'provider' | 'agent';
-    onGoClaudeCodex?: () => void;
     onGoProviderPool?: () => void;
   } = $props();
 
@@ -250,6 +256,28 @@
     model: string;
   }>(null);
 
+  /**
+   * Claude Code 首次引导弹窗。
+   *
+   * 这个开关和「用哪个 provider」无关，是整台机器上 Claude Code 的一份
+   * `~/.claude.json` 标记。原来点按钮要跳到 Claude & Codex 页，现在就地
+   * 开弹窗 —— 用户在勾 provider 的时候顺手就能改，不用离开当前上下文。
+   */
+  let onboardingDialog = $state<null | { status: ClaudeOnboardingStatus | null; busy: boolean }>(
+    null,
+  );
+
+  /**
+   * Codex 后端开关弹窗。
+   *
+   * 三选一（自动 / 绕过 / 走官方后端），写的是「某个 provider 分配给 Codex 时」
+   * 的那条设置。和档位映射一样，在当前页就地改完。
+   */
+  let codexAuthDialog = $state<null | { providerId: string; value: boolean | null }>(null);
+
+  /** Cursor 卡片默认折叠：它的数据在 SQLite 里，和上面几个 agent 不是一套。 */
+  let cursorOpen = $state(false);
+
   const MODALITY_OPTIONS = [
     { value: 'text', label: '文本' },
     { value: 'image', label: '图片' },
@@ -259,12 +287,18 @@
 
   const EFFORT_OPTIONS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 
-  /** 空模型：只填了 id 的状态。 */
+  /**
+   * 空模型：新加一行时的初始值。
+   *
+   * 预置「文本输入」和「支持推理」—— 现在绝大多数可用的模型都是这两项为真，
+   * 每次手点一遍是多余动作。需要时照样可以取消。
+   */
   function blankModel(id = ''): ModelSpec {
     return {
       id,
-      inputModalities: [],
+      inputModalities: ['text'],
       outputModalities: [],
+      reasoning: true,
       reasoningEfforts: [],
     };
   }
@@ -579,6 +613,68 @@
     claudeMapDialog = null;
   }
 
+  /** 打开 Claude 首次引导弹窗，先读一次当前状态。 */
+  async function openOnboardingDialog() {
+    onboardingDialog = { status: null, busy: false };
+    try {
+      const status = await claudeOnboardingStatus();
+      // 弹窗可能在读盘期间被关掉了，这时不要把状态写回去
+      if (onboardingDialog) onboardingDialog = { status, busy: false };
+    } catch (e) {
+      log = `读取 Claude 引导状态失败：${e instanceof Error ? e.message : String(e)}`;
+      onboardingDialog = null;
+    }
+  }
+
+  /** 切换「跳过首次引导」。成功后就地更新弹窗里的状态，不跳页。 */
+  async function toggleOnboarding(skip: boolean) {
+    const dlg = onboardingDialog;
+    if (!dlg?.status || dlg.busy) return;
+    onboardingDialog = { ...dlg, busy: true };
+    try {
+      const r = await setClaudeOnboardingSkip(skip);
+      log = r.output;
+      if (!r.ok) throw new Error(r.output);
+      const status = await claudeOnboardingStatus();
+      if (onboardingDialog) onboardingDialog = { status, busy: false };
+    } catch (e) {
+      log = `切换失败：${e instanceof Error ? e.message : String(e)}`;
+      if (onboardingDialog) onboardingDialog = { ...dlg, busy: false };
+    }
+  }
+
+  /**
+   * 打开 Codex 后端开关弹窗，带上当前 provider 已选的值。
+   *
+   * `providerId` 为空串表示 Codex 还没有分配任何 provider。这时照样弹窗，
+   * 只是弹窗里提示先勾一个、保存按钮禁用 —— 之前这里用 `if (cur)` 拦住，
+   * 未分配时点按钮没有任何反应，看起来就是个坏按钮。
+   */
+  function openCodexAuthDialog(providerId: string | null) {
+    const id = providerId ?? '';
+    const p = providers.find((x) => x.id === id);
+    codexAuthDialog = { providerId: id, value: p?.codexRequiresOpenaiAuth ?? null };
+  }
+
+  /** 保存 Codex 后端开关。后端会立刻只重写 Codex 的配置。 */
+  async function confirmCodexAuth() {
+    const dlg = codexAuthDialog;
+    // 没分配 provider 时没有可写的位置，弹窗里保存按钮也是禁用的
+    if (!dlg || !dlg.providerId) return;
+    busy = true;
+    try {
+      const r = await setCodexRequiresOpenaiAuth(dlg.providerId, dlg.value);
+      log = r.output;
+      if (!r.ok) throw new Error(r.output);
+      codexAuthDialog = null;
+      await load();
+    } catch (e) {
+      log = `写入失败：${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      busy = false;
+    }
+  }
+
   /** 确认 Codex 用哪个模型：写母版 `codex_model`，立刻重写 codex 配置。 */
   async function confirmCodexModel() {
     const dlg = codexModelDialog;
@@ -685,8 +781,8 @@
       name: p.name,
       baseUrl: p.baseUrl,
       kind: p.kind,
-      // 留空表示不修改
-      apiKey: '',
+      // 预填当前 key 明文，改不改由你决定
+      apiKey: p.apiKey ?? '',
       // 深拷贝：编辑时改动不应该提前影响列表里的对象
       models: p.models.map((raw) => {
         const m = normalizeModel(raw);
@@ -832,28 +928,28 @@
     if (e.key !== 'Escape' || busy) return;
     if (isNew || editing) cancelEdit();
     else if (claudeMapDialog) closeClaudeMapDialog();
+    else if (onboardingDialog) onboardingDialog = null;
+    else if (codexAuthDialog) codexAuthDialog = null;
     else if (assigningId) assigningId = null;
   }}
 />
 
 {#if view === 'provider'}
   <PageHead title="provider 管理">
-    维护 provider 池：每个 provider 只保留一把 key，编辑在对话框里完成。
-    <br />
-    <span class="text-[var(--color-text-muted)]">
-      母版在 <code class="font-[var(--font-mono)] text-[11px]"
-        >~/.agents/providers.toml</code
-      >，含明文 key，已在 .gitignore 中隔离。要用在哪些 agent 上，看左侧的「启用 provider」。
-    </span>
+    统一管理所有 provider，并控制每个 provider 在哪些 agent 上启用。配置保存在
+    <code class="font-[var(--font-mono)] text-[11px]">~/.agents/providers.toml</code>。
+    <Tip label="这个文件里有什么" class="mt-1">
+      每个 provider 只保留一把 key，编辑在对话框里完成。这个文件含明文 key，已在
+      <code class="font-[var(--font-mono)]">.gitignore</code> 中隔离，不会被提交。
+    </Tip>
   </PageHead>
 {:else}
   <PageHead title="启用 provider">
-    按 agent 分组，勾选每个 agent 启用哪几个 provider。勾选只写母版，
-    点「应用到各 agent」才真正写进各家配置文件。
-    <br />
-    <span class="text-[var(--color-text-muted)]">
-      单槽位的 agent（Claude Code、Codex 等）同一时刻只能有一个 provider 生效。
-    </span>
+    按 agent 分组，勾选每个 agent 启用哪几个 provider。
+    <Tip label="勾选后什么时候生效" class="mt-1">
+      勾选只写母版，点「应用到各 agent」才真正写进各家配置文件。
+      Claude Code、Codex 这类只有一个位置的 agent，同一时刻只能有一个 provider 生效。
+    </Tip>
   </PageHead>
 {/if}
 
@@ -910,11 +1006,11 @@
         <h2 id="provider-edit-title" class="text-[15px] font-semibold text-[var(--color-text)]">
           {isNew ? '新增 provider' : `编辑 ${editing?.name}`}
         </h2>
-        <p class="mt-1 text-[12px] text-[var(--color-text-muted)]">
-          {isNew
-            ? '填写后保存到 provider 池。要用在哪些 agent 上，保存后切到「启用 provider」。'
-            : '改的是池里这一条。已有的分配不会在这里被清掉。'}
-        </p>
+        {#if !isNew}
+          <p class="mt-1 text-[12px] text-[var(--color-text-muted)]">
+            改的是池里这一条，已有的分配不会被清掉。
+          </p>
+        {/if}
       </div>
 
       <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
@@ -944,10 +1040,7 @@
       </label>
 
       <label class="col-span-2 block">
-        <span class="field-label">
-          默认协议
-          <span class="text-[var(--color-text-faint)]">（未单独指定的 agent 用它）</span>
-        </span>
+        <span class="field-label">默认协议</span>
         <select class="field-control w-full" bind:value={form.kind}>
           {#each KIND_OPTIONS as k (k.value)}
             <option value={k.value}>{k.label}</option>
@@ -955,95 +1048,81 @@
         </select>
       </label>
 
-      <!-- 按 agent 覆盖协议。默认折叠，避免编辑区一上来就被长列表占满。 -->
-      {#if matrix && matrix.columns.length > 0}
-        <div class="col-span-2 rounded-[var(--radius-md)] border border-[var(--color-border)]">
+      <!--
+        按 agent 覆盖协议。只在编辑时出现：新增的 provider 还没分配给任何 agent，
+        逐行设置没有意义（整块都会是灰的），留着只会让新增表单变长。
+      -->
+      {#if !isNew && matrix && matrix.columns.length > 0}
+        <div class="col-span-2">
           <button
             type="button"
-            class="flex w-full items-center gap-2 px-3 py-2.5 text-left hover:bg-[var(--color-bg-hover)]"
+            class="flex w-full items-center gap-1.5 rounded-[var(--radius-sm)] py-0.5 text-left text-[12px] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
             aria-expanded={showAgentKinds}
             onclick={() => (showAgentKinds = !showAgentKinds)}
           >
-            <span class="text-[13px] text-[var(--color-text-faint)]">{showAgentKinds ? '▾' : '▸'}</span>
-            <span class="min-w-0 flex-1">
-              <span class="block text-[13px] font-medium text-[var(--color-text)]">
-                各 agent 实际用的协议
-              </span>
-              <span class="block text-[12px] text-[var(--color-text-faint)]">
-                {#if overrideCount() > 0}
-                  已为 {overrideCount()} 个 agent 单独指定协议
-                {:else}
-                  默认折叠。同一端点在不同 agent 可不同，留默认就不单独存
-                {/if}
-              </span>
-            </span>
+            <span class="text-[10px] text-[var(--color-text-faint)]">{showAgentKinds ? '▾' : '▸'}</span>
+            <span>为个别 agent 单独指定协议</span>
+            {#if overrideCount() > 0}
+              <span class="text-[var(--color-text-faint)]">（{overrideCount()} 个）</span>
+            {/if}
           </button>
 
           {#if showAgentKinds}
-            <div class="border-t border-[var(--color-border)] px-3 py-2.5">
-              <div class="flex flex-col gap-2">
-                {#each matrix.columns as col (col.agent)}
-                  {@const assigned = editing ? editing.agents.includes(col.agent) : false}
-                  {@const overridden = hasOverride(col.agent)}
-                  {@const options = kindsForAgent(col.agent)}
-                  <div class="grid grid-cols-[7.5rem_minmax(0,1fr)_4.5rem] items-center gap-x-4 {assigned ? '' : 'opacity-50'}">
-                    <span class="truncate text-[13px] text-[var(--color-text)]" title={col.label}>
-                      {col.label}
+            <div class="mt-2 flex flex-col gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] px-3 py-2.5">
+              {#each matrix.columns as col (col.agent)}
+                {@const assigned = editing ? editing.agents.includes(col.agent) : false}
+                {@const overridden = hasOverride(col.agent)}
+                {@const options = kindsForAgent(col.agent)}
+                <div class="grid grid-cols-[7.5rem_minmax(0,1fr)_4.5rem] items-center gap-x-4 {assigned ? '' : 'opacity-50'}">
+                  <span class="truncate text-[13px] text-[var(--color-text)]" title={col.label}>
+                    {col.label}
+                  </span>
+                  {#if options.length === 1}
+                    <span
+                      class="field-control flex min-w-0 flex-1 items-center text-[var(--color-text-faint)]"
+                      title="这个 agent 只支持这一种协议"
+                    >
+                      {options[0].label}
                     </span>
-                    {#if options.length === 1}
-                      <span
-                        class="field-control flex min-w-0 flex-1 items-center text-[var(--color-text-faint)]"
-                        title="这个 agent 只支持这一种协议"
-                      >
-                        {options[0].label}
-                      </span>
-                    {:else}
-                      <select
-                        class="field-control min-w-0 flex-1"
-                        value={kindForAgent(col.agent)}
-                        onchange={(e) => setKindForAgent(col.agent, e.currentTarget.value)}
-                      >
-                        {#each options as k (k.value)}
-                          <option value={k.value}>{k.label}</option>
-                        {/each}
-                      </select>
-                    {/if}
-                    {#if overridden && options.length > 1}
-                      <button
-                        type="button"
-                        class="whitespace-nowrap text-right text-[12px] text-[var(--color-text-faint)] underline-offset-2 hover:text-[var(--color-accent)] hover:underline"
-                        onclick={() => delete form.agentKinds[col.agent]}
-                      >
-                        恢复默认
-                      </button>
-                    {:else}
-                      <span class="text-right text-[12px] text-[var(--color-text-faint)]">
-                        {options.length === 1 ? '固定' : '默认'}
-                      </span>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-              <div class="mt-2 text-[12px] text-[var(--color-text-faint)]">
-                灰色的 agent 当前没分配这个 provider。协议可以预先设好，分配后生效。
-              </div>
+                  {:else}
+                    <select
+                      class="field-control min-w-0 flex-1"
+                      value={kindForAgent(col.agent)}
+                      onchange={(e) => setKindForAgent(col.agent, e.currentTarget.value)}
+                    >
+                      {#each options as k (k.value)}
+                        <option value={k.value}>{k.label}</option>
+                      {/each}
+                    </select>
+                  {/if}
+                  {#if overridden && options.length > 1}
+                    <button
+                      type="button"
+                      class="whitespace-nowrap text-right text-[12px] text-[var(--color-text-faint)] underline-offset-2 hover:text-[var(--color-accent)] hover:underline"
+                      onclick={() => delete form.agentKinds[col.agent]}
+                    >
+                      恢复默认
+                    </button>
+                  {:else}
+                    <span class="text-right text-[12px] text-[var(--color-text-faint)]">
+                      {options.length === 1 ? '固定' : '默认'}
+                    </span>
+                  {/if}
+                </div>
+              {/each}
+              <div class="text-[11px] text-[var(--color-text-faint)]">灰色表示这个 provider 还没分配给该 agent。</div>
             </div>
           {/if}
         </div>
       {/if}
 
       <label class="col-span-2 block">
-        <span class="field-label">
-          API key
-          {#if editing}
-            <span class="text-[var(--color-text-faint)]">（留空表示不修改）</span>
-          {/if}
-        </span>
+        <span class="field-label">API key</span>
         <input
           class="field-control w-full font-[var(--font-mono)]"
-          type="password"
+          type="text"
           bind:value={form.apiKey}
-          placeholder={editing ? `当前 ${editing.keyLen} 字符，末尾 ${editing.keyTail}` : 'sk-...'}
+          placeholder="sk-..."
         />
       </label>
 
@@ -1065,7 +1144,7 @@
           <div
             class="rounded-[var(--radius-md)] border border-dashed border-[var(--color-border-strong)] py-3 text-center text-[11px] text-[var(--color-text-faint)]"
           >
-            还没加模型。注入时会给一个占位模型，实际用不了，建议至少填一个。
+            还没有模型。至少加一个，否则注入时只能用占位模型。
           </div>
         {:else}
           <div class="flex flex-col gap-2">
@@ -1073,17 +1152,17 @@
               {@const key = `${form.id}:${m.id}:${i}`}
               {@const open = openModel === key}
               <div class="overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-border)]">
-                <!-- 折叠态：id + 能力摘要 -->
-                <div class="flex items-center gap-2 px-3 py-2">
+                <!-- 折叠态：id + 能力摘要。用紧凑尺寸，让这一行和其它单行控件等高 -->
+                <div class="flex items-center gap-2 px-3 py-1">
                   <button
-                    class="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-[13px] text-[var(--color-text-faint)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]"
+                    class="flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-[11px] text-[var(--color-text-faint)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text)]"
                     aria-label={open ? '收起模型元数据' : '展开模型元数据'}
                     onclick={() => openModelEditor(key)}
                   >
                     {#if open}▾{:else}▸{/if}
                   </button>
                   <input
-                    class="field-control w-[240px] shrink-0 font-[var(--font-mono)]"
+                    class="field-control-sm w-[240px] shrink-0 font-[var(--font-mono)]"
                     bind:value={m.id}
                     placeholder="model-id"
                   />
@@ -1091,12 +1170,12 @@
                     {modelSummary(m)}
                   </span>
                   <button
-                    class="shrink-0 rounded-[var(--radius-sm)] p-1.5 text-[var(--color-text-faint)] hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
+                    class="shrink-0 rounded-[var(--radius-sm)] p-1 text-[var(--color-text-faint)] hover:bg-[var(--color-danger-bg)] hover:text-[var(--color-danger)]"
                     title="移除这个模型"
                     aria-label={`移除模型 ${m.id || i}`}
                     onclick={() => form.models.splice(i, 1)}
                   >
-                    <Trash2 size={14} />
+                    <Trash2 size={13} />
                   </button>
                 </div>
 
@@ -1229,8 +1308,8 @@
                         {/if}
                       </div>
 
-                      <div class="text-[12px] text-[var(--color-text-faint)]">
-                        上下文与输出按 k token 填写（1000 = 100 万 token）。留空表示不指定，注入时沿用现有值。
+                      <div class="text-[11px] text-[var(--color-text-faint)]">
+                        留空则不指定，注入时沿用现有值。
                       </div>
                     </div>
                   </div>
@@ -1456,7 +1535,7 @@
                   type="button"
                   class="rounded-[var(--radius-sm)] border border-[var(--color-border-strong)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
                   title="Claude Code 的首次引导跳过标记"
-                  onclick={() => onGoClaudeCodex()}
+                  onclick={openOnboardingDialog}
                 >
                   首次引导设置
                 </button>
@@ -1498,7 +1577,7 @@
                   type="button"
                   class="rounded-[var(--radius-sm)] border border-[var(--color-border-strong)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
                   title="requires_openai_auth：是否绕过 ChatGPT 后端"
-                  onclick={() => onGoClaudeCodex()}
+                  onclick={() => openCodexAuthDialog(chosen[0]?.id ?? null)}
                 >
                   后端开关
                 </button>
@@ -1529,7 +1608,13 @@
     -->
     {#if cursorAvailable}
       <div class="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)]">
-        <div class="flex items-center gap-3 px-4 py-3">
+        <button
+          type="button"
+          class="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-[var(--color-bg-hover)]"
+          aria-expanded={cursorOpen}
+          onclick={() => (cursorOpen = !cursorOpen)}
+        >
+          <span class="text-[13px] text-[var(--color-text-faint)]">{cursorOpen ? '▾' : '▸'}</span>
           <div
             class="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-bg-muted)]"
           >
@@ -1544,10 +1629,12 @@
               配置在 SQLite 库里，不走「应用到各 agent」
             </div>
           </div>
-        </div>
-        <div class="border-t border-[var(--color-border)] px-4 py-3">
-          <CursorByok {providers} bind:providerId={cursorProviderId} compact onDone={() => load()} />
-        </div>
+        </button>
+        {#if cursorOpen}
+          <div class="border-t border-[var(--color-border)] px-4 py-3">
+            <CursorByok {providers} bind:providerId={cursorProviderId} compact onDone={() => load()} />
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
@@ -1620,6 +1707,173 @@
 {#if log}
   <div class="mt-4">
     <Log text={log} maxHeight="320px" />
+  </div>
+{/if}
+
+{#if onboardingDialog}
+  {@const st = onboardingDialog.status}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+    role="dialog"
+    tabindex="-1"
+    aria-modal="true"
+    aria-labelledby="onboarding-title"
+    onclick={(e) => {
+      if (e.target === e.currentTarget && !onboardingDialog?.busy) onboardingDialog = null;
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape' && !onboardingDialog?.busy) onboardingDialog = null;
+    }}
+  >
+    <div
+      class="w-full max-w-md rounded-[var(--radius-lg)] border border-[var(--color-border-strong)] bg-[var(--color-bg)] p-4 shadow-lg"
+    >
+      <h2 id="onboarding-title" class="text-[14px] font-medium text-[var(--color-text)]">
+        Claude Code 首次引导
+      </h2>
+      <p class="mt-1 text-[12px] leading-relaxed text-[var(--color-text-muted)]">
+        第一次启动不再要求选主题和登录 Anthropic 账号，直接进主界面。
+      </p>
+
+      {#if !st}
+        <div class="mt-3 h-10 animate-pulse rounded-[var(--radius-md)] bg-[var(--color-bg-muted)]"></div>
+      {:else if !st.available}
+        <p class="mt-3 text-[12px] text-[var(--color-text-muted)]">
+          这台机器上没找到 Claude Code（<code class="text-[11px]">~/.claude.json</code> 和
+          <code class="text-[11px]">~/.claude</code> 都不存在）。装了之后再来。
+        </p>
+      {:else}
+        <div class="mt-3 flex items-start justify-between gap-4">
+          <div class="min-w-0">
+            <div class="text-[13px] text-[var(--color-text)]">跳过首次引导</div>
+            <div class="mt-0.5 font-[var(--font-mono)] text-[11px] text-[var(--color-text-faint)]">
+              {st.path}
+            </div>
+          </div>
+          <Switch
+            checked={st.skipped}
+            disabled={onboardingDialog.busy}
+            label="跳过首次引导"
+            onchange={toggleOnboarding}
+          />
+        </div>
+        <Tip label="它改了什么" class="mt-2">
+          开启后写入 <code class="text-[11px]">~/.claude.json</code> 的
+          <code class="text-[11px]">hasCompletedOnboarding: true</code>；关闭是删掉这个字段
+          （不是写 false），引导会重新出现。
+        </Tip>
+      {/if}
+
+      <div class="mt-4 flex justify-end">
+        <Button variant="ghost" onclick={() => (onboardingDialog = null)} disabled={onboardingDialog.busy}>
+          关闭
+        </Button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if codexAuthDialog}
+  {@const AUTH_OPTIONS = [
+    {
+      value: null as boolean | null,
+      label: '自动',
+      desc: '看 ~/.codex/auth.json 里有没有官方登录。有登录走 ChatGPT 后端，没登录只认 provider 里的 token。',
+    },
+    {
+      value: false as boolean | null,
+      label: '绕过 ChatGPT 后端',
+      desc: 'requires_openai_auth = false。只用 provider 表里的 experimental_bearer_token。用第三方中转时选这个。',
+    },
+    {
+      value: true as boolean | null,
+      label: '走 ChatGPT 后端',
+      desc: 'requires_openai_auth = true。带着官方登录去请求，只适合官方镜像。配第三方端点会把登录凭据发给对方。',
+    },
+  ]}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+    role="dialog"
+    tabindex="-1"
+    aria-modal="true"
+    aria-labelledby="codex-auth-title"
+    onclick={(e) => {
+      if (e.target === e.currentTarget && !busy) codexAuthDialog = null;
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape' && !busy) codexAuthDialog = null;
+    }}
+  >
+    <div
+      class="w-full max-w-lg rounded-[var(--radius-lg)] border border-[var(--color-border-strong)] bg-[var(--color-bg)] p-4 shadow-lg"
+    >
+      <h2 id="codex-auth-title" class="text-[14px] font-medium text-[var(--color-text)]">
+        Codex 后端开关
+      </h2>
+      <p class="mt-1 text-[12px] leading-relaxed text-[var(--color-text-muted)]">
+        {#if codexAuthDialog.providerId}
+          当前 provider：<code class="text-[11px]">{codexAuthDialog.providerId}</code>。
+          改完立刻只重写 <code class="text-[11px]">~/.codex/config.toml</code>。
+        {:else}
+          还没有给 Codex 分配 provider，没有可以写这条设置的地方。先在下面的列表里勾选一个
+          provider，再点「后端开关」。
+        {/if}
+      </p>
+
+      <div class="mt-3 flex flex-col gap-2">
+        {#each AUTH_OPTIONS as opt}
+          {@const selected = codexAuthDialog.value === opt.value}
+          <button
+            type="button"
+            class="rounded-[var(--radius-md)] border px-3 py-2.5 text-left transition-colors {selected
+              ? 'border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent)_10%,transparent)]'
+              : 'border-[var(--color-border-strong)] hover:border-[var(--color-accent)]'}"
+            aria-pressed={selected}
+            disabled={busy || !codexAuthDialog.providerId}
+            onclick={() => {
+              if (!codexAuthDialog) return;
+              codexAuthDialog = { ...codexAuthDialog, value: opt.value };
+            }}
+          >
+            <span class="flex items-center gap-2">
+              <span
+                class="flex h-4 w-4 items-center justify-center rounded-full border {selected
+                  ? 'border-[var(--color-accent)]'
+                  : 'border-[var(--color-border-strong)]'}"
+              >
+                {#if selected}
+                  <span class="h-2 w-2 rounded-full bg-[var(--color-accent)]"></span>
+                {/if}
+              </span>
+              <span class="text-[13px] font-medium text-[var(--color-text)]">{opt.label}</span>
+              {#if opt.value === null}
+                <span class="text-[11px] text-[var(--color-text-faint)]">（默认）</span>
+              {/if}
+            </span>
+            <span class="mt-1 block pl-6 text-[12px] leading-relaxed text-[var(--color-text-muted)]">
+              {opt.desc}
+            </span>
+          </button>
+        {/each}
+      </div>
+
+      <div
+        class="mt-3 flex items-start gap-1.5 rounded-[var(--radius-md)] bg-[var(--color-bg-subtle)] px-3 py-2 text-[11px] leading-relaxed text-[var(--color-text-muted)]"
+      >
+        <span>
+          这个值写到 <code class="font-[var(--font-mono)]">~/.codex/config.toml</code> 的
+          <code class="font-[var(--font-mono)]">[model_providers.custom].requires_openai_auth</code>。
+          选「走 ChatGPT 后端」会把你的官方登录凭据发给该 provider 的地址。
+        </span>
+      </div>
+
+      <div class="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" onclick={() => (codexAuthDialog = null)} disabled={busy}>取消</Button>
+        <Button variant="primary" onclick={confirmCodexAuth} disabled={busy || !codexAuthDialog.providerId}>
+          {busy ? '写入中…' : '保存'}
+        </Button>
+      </div>
+    </div>
   </div>
 {/if}
 
@@ -1824,5 +2078,37 @@
 
   :global(.field-control:disabled) {
     opacity: 0.6;
+  }
+
+  /* 紧凑控件：用在列表行里，和周围的 12px 文字同高，不撑高整行。 */
+  :global(.field-control-sm) {
+    display: block;
+    box-sizing: border-box;
+    height: 28px;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg);
+    padding: 0 8px;
+    font-size: 12px;
+    line-height: 26px;
+    color: var(--color-text);
+  }
+
+  /*
+   * 数字输入框关掉原生上下箭头。
+   *
+   * 这里填的是 k token（1000 / 128 这种量级），逐个点箭头没有意义；
+   * 而箭头画在输入框右侧，会和绝对定位的「k token」后缀叠在一起。
+   */
+  :global(input[type='number'].field-control) {
+    appearance: textfield;
+    -moz-appearance: textfield;
+  }
+
+  :global(input[type='number'].field-control::-webkit-outer-spin-button),
+  :global(input[type='number'].field-control::-webkit-inner-spin-button) {
+    -webkit-appearance: none;
+    appearance: none;
+    margin: 0;
   }
 </style>

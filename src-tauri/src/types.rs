@@ -92,6 +92,28 @@ pub struct Skill {
     pub file_count: usize,
     /// 目录字节数
     pub size_bytes: u64,
+    /// 归属的 agent 列表。空数组 = 公共 skill，所有 agent 都能读
+    pub agents: Vec<String>,
+    /// 专用 skill 的本体目录。公共 skill 为空
+    pub store_path: Option<String>,
+    /// 专用 skill 在各 agent 目录里链接的健康状态。公共 skill 恒为 `ok`
+    pub link_state: PrivateLinkState,
+}
+
+/// 专用 skill 的链接健康状态。
+///
+/// 专有性完全靠链接维持：本体在 `~/.agents/skills-mapping-<agent>/`，
+/// agent 目录里的那一份是指向它的链接。链接一断，agent 就悄悄读不到这个 skill，
+/// 而界面上没有任何报错 —— 所以必须显式建模这个状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PrivateLinkState {
+    /// 所有归属 agent 的位置都是指向本体的有效链接，或者本身就是本体（第一个 agent）
+    Ok,
+    /// 位置存在但是个断链，指向的目录已经不在了
+    Broken,
+    /// 位置根本不存在，需要建链接
+    Missing,
 }
 
 /// 散落在别的 agent 目录里、尚未收进 `~/.agents` 的 skill。
@@ -101,6 +123,11 @@ pub struct OrphanSkill {
     pub name: String,
     /// 出现在哪个 agent 目录，如 `.cursor/skills`
     pub location: String,
+    /// 哪个 agent 的目录，如 `cursor`。界面据此显示「标记为 cursor 专用」
+    ///
+    /// 从路径反推不出来也可以为 None（比如用户手工传了个陌生路径），
+    /// 那时界面不提供「标记专用」这个动作。
+    pub agent: Option<String>,
     /// 完整路径
     pub path: String,
     /// 与中心库同名 skill 的比对结果
@@ -172,6 +199,9 @@ pub enum OrphanAction {
     Delete,
     /// 坏链接：删掉链接文件本身，不碰任何真实内容
     RemoveLink,
+    /// 标记为当前 agent 专用：移进 `~/.agents/skills-mapping-<agent>`，
+    /// 原位置建链接，并写一条归属记录。不进公共库
+    Privatize,
 }
 
 impl OrphanAction {
@@ -189,6 +219,7 @@ impl OrphanAction {
             "take-shared" | "use-shared" | "keep-shared" => Some(Self::TakeShared),
             "delete" | "rm" => Some(Self::Delete),
             "remove-link" | "unlink" => Some(Self::RemoveLink),
+            "privatize" | "mark-private" | "exclusive" => Some(Self::Privatize),
             _ => None,
         }
     }
@@ -202,6 +233,7 @@ impl OrphanAction {
             Self::TakeShared => "take-shared",
             Self::Delete => "delete",
             Self::RemoveLink => "remove-link",
+            Self::Privatize => "privatize",
         }
     }
 
@@ -221,8 +253,40 @@ impl OrphanAction {
             Self::TakeShared => &[Conflict, Identical],
             Self::Delete => &[],
             Self::RemoveLink => &[],
+            // 中心库已经有同名 skill 时，这个 skill 的内容是"公共的"，
+            // 把它标成某个 agent 专用等于把别人也在用的东西拿走。
+            // 只允许对中心库没有的（unique）做这个动作。
+            Self::Privatize => &[Unique],
         }
     }
+}
+
+/// 一个 agent 的指令文档现状：通用片段 + 专用片段 + 合成产物。
+///
+/// 界面用它渲染片段选项卡和"待生成"提示。纯只读快照。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDoc {
+    /// agent 标识，如 `cursor`
+    pub agent: String,
+    /// 展示名
+    pub label: String,
+    /// 通用母版路径（`~` 形式）
+    pub common_path: String,
+    /// 该 agent 的指令文件最终落点，如 `~/.cursor/AGENTS.md`
+    pub target: String,
+    /// 专用片段路径，无论存不存在都给出来，方便界面做"新建"
+    pub specific_path: String,
+    /// 专用片段是否存在。false 表示这个 agent 直接读通用母版
+    pub specific_exists: bool,
+    /// 合成产物路径。没有专用片段时为 None
+    pub composed_path: Option<String>,
+    /// 合成产物与当前片段内容不一致，需要重建
+    pub composed_stale: bool,
+    /// 这个 agent 最终会读到的字节数（有专用片段时是合成后的大小）
+    pub bytes: u64,
+    /// 该 agent 的配置目录是否存在。false 表示工具未安装
+    pub installed: bool,
 }
 
 /// 一条处置执行结果。界面把它逐条显示在 dialog 下方。
@@ -236,6 +300,47 @@ pub struct OrphanActionResult {
     pub ok: bool,
     /// 人话说明，成功或失败都写这里
     pub message: String,
+}
+
+/// 专用 skill 的一条链接现场状态。
+///
+/// 一条专用记录可能对应多个 agent，每个 agent 目录里的链接单独报告 ——
+/// 用户要知道具体是哪一处断了，只说「这个 skill 有问题」没法修。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivateLinkView {
+    /// agent 标识
+    pub agent: String,
+    /// agent 展示名
+    pub label: String,
+    /// 该 agent 的 skills 目录里这个 skill 的位置
+    pub path: String,
+    /// 这一处的状态
+    pub state: PrivateLinkState,
+    /// 实际链接方式，不是链接时为空
+    pub actual: Option<LinkKind>,
+    /// 补充说明，如「指向的不是本体」
+    pub note: Option<String>,
+}
+
+/// 一条专用 skill 记录的完整视图：本体位置 + 每个 agent 的链接状态。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillMappingView {
+    /// skill 名
+    pub skill: String,
+    /// 归属 agent 列表
+    pub agents: Vec<String>,
+    /// 本体所在目录
+    pub store_path: String,
+    /// 本体是否存在
+    pub store_exists: bool,
+    /// 各 agent 的链接状态
+    pub links: Vec<PrivateLinkView>,
+    /// 整体状态：全部 ok 才 ok，否则取最差的那个
+    pub state: PrivateLinkState,
+    /// 配置里要求的链接方式
+    pub mode: LinkMode,
 }
 
 /// 一次 collect 操作的完整计划，dry-run 时就是这个结构。
@@ -547,8 +652,10 @@ pub struct BackfillReport {
 
 /// 母版里的一条 provider，前端展示用。
 ///
-/// **apiKey 不出现在这个结构里**。前端只能看到长度和末尾 4 位，
-/// 编辑时要重新输入。这是有意的：密钥原文不跨进程边界。
+/// **`api_key` 是明文原文**。母版文件 `~/.agents/providers.toml` 本身就是明文，
+/// 界面也跑在本机 WebView 里，所以直接把真 key 给到前端 —— 编辑框能显示当前值，
+/// 不用让用户凭「末尾 4 位」猜。`key_len` / `key_tail` 保留，用于列表页判断
+/// 有没有配 key，以及侧栏等不需要原文的地方。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderView {
@@ -581,6 +688,8 @@ pub struct ProviderView {
     /// 所以只能靠这个字段决定用哪个。`None` 表示回退到 `models` 的第一个。
     pub codex_model: Option<String>,
     pub note: String,
+    /// key 明文原文。界面编辑框直接显示它
+    pub api_key: String,
     /// key 长度，用于界面提示"已配置"
     pub key_len: usize,
     /// key 末尾 4 位，帮助辨认
