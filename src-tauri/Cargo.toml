@@ -1,6 +1,6 @@
 [package]
 name = "agentcenter"
-version = "0.2.1"
+version = "0.3.0"
 description = "统一管理多个 AI coding agent 的全局配置"
 edition = "2021"
 rust-version = "1.77"
