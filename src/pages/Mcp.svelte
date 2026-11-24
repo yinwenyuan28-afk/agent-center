@@ -25,6 +25,7 @@
   } from '@lucide/svelte';
   import {
     deleteMcpServer,
+    diffMcp,
     importMcpFromAgents,
     listMcpServers,
     mcpMatrix,
@@ -32,7 +33,7 @@
     setMcpRow,
     syncMcp,
   } from '../lib/ipc';
-  import type { McpMatrix, McpServerView } from '../lib/types';
+  import type { McpDiffReportView, McpMatrix, McpServerView } from '../lib/types';
   import PageHead from '../lib/components/PageHead.svelte';
   import Button from '../lib/components/Button.svelte';
   import Badge from '../lib/components/Badge.svelte';
@@ -41,6 +42,13 @@
 
   let matrix = $state<McpMatrix | null>(null);
   let servers = $state<McpServerView[]>([]);
+  /**
+   * 母版与各 agent 实际配置的差异。
+   *
+   * 界面上的勾选只代表母版分配；用它才能显示「已分配但还没写进配置文件」
+   * 的条目，避免把母版状态当成已生效状态。
+   */
+  let diff = $state<McpDiffReportView | null>(null);
   let loading = $state(true);
   let busy = $state(false);
   let log = $state('');
@@ -69,12 +77,34 @@
   async function load() {
     loading = true;
     try {
-      matrix = await mcpMatrix();
-      servers = await listMcpServers();
+      // 三个都只读：矩阵和列表来自母版，diff 来自各 agent 的实际配置。
+      // 一起加载才能在行上标出「待应用」。diff 失败不影响主列表。
+      const [m, s, d] = await Promise.all([
+        mcpMatrix(),
+        listMcpServers(),
+        diffMcp().catch(() => null),
+      ]);
+      matrix = m;
+      servers = s;
+      diff = d;
     } catch (e) {
       log = `读取失败：${e instanceof Error ? e.message : String(e)}`;
     } finally {
       loading = false;
+    }
+  }
+
+  /** 某个 server 有多少条「母版与配置不一致」的记录。0 表示已同步。 */
+  function pendingFor(id: string): number {
+    return diff?.lines.filter((l) => l.target === id && l.action !== 'unchanged').length ?? 0;
+  }
+
+  /** 只重算 diff，不改母版。分配变化后调用。 */
+  async function refreshDiff() {
+    try {
+      diff = await diffMcp();
+    } catch {
+      // 读不到就让标记留在上一次的结果，不打断操作
     }
   }
 
@@ -99,6 +129,7 @@
     try {
       const r = await setMcpRow(serverId, next);
       if (!r.ok) throw new Error(r.output);
+      await refreshDiff();
     } catch (e) {
       row.assigned = prev;
       servers = servers.map((s) => (s.id === serverId ? { ...s, agents: prev } : s));
@@ -123,6 +154,7 @@
     try {
       const r = await setMcpRow(serverId, next);
       if (!r.ok) throw new Error(r.output);
+      await refreshDiff();
     } catch (e) {
       row.assigned = prev;
       servers = servers.map((s) => (s.id === serverId ? { ...s, agents: prev } : s));
@@ -135,6 +167,7 @@
     try {
       const r = await syncMcp(false);
       log = r.log.join('\n');
+      await refreshDiff();
     } catch (e) {
       log = `应用失败：${e instanceof Error ? e.message : String(e)}`;
     } finally {
@@ -488,6 +521,9 @@
               {#if !row.enabled}
                 <Badge tone="warn">全局停用</Badge>
               {/if}
+              {#if pendingFor(row.id) > 0}
+                <Badge tone="info">待应用到 {pendingFor(row.id)} 处</Badge>
+              {/if}
             </div>
             <div
               class="truncate font-[var(--font-mono)] text-[11px] text-[var(--color-text-faint)]"
@@ -574,7 +610,7 @@
                   disabled={!col.available || busy}
                   title={col.available ? `切换「${row.id}」在 ${col.label}` : `${col.label} 不可用`}
                   aria-pressed={on}
-                  aria-label={`${row.id} 在 ${col.label} ${on ? '已启用' : '未启用'}`}
+                  aria-label={`${row.id} 在 ${col.label} ${on ? '已分配' : '未分配'}`}
                   onclick={() => toggleAgent(row.id, col.agent)}
                 >
                   <span
@@ -592,9 +628,9 @@
                     {#if !col.available}
                       <span class="block text-[10px] opacity-70">未安装</span>
                     {:else if on}
-                      <span class="block text-[10px] opacity-80">已启用</span>
+                      <span class="block text-[10px] opacity-80">已分配</span>
                     {:else}
-                      <span class="block text-[10px] text-[var(--color-text-faint)]">未启用</span>
+                      <span class="block text-[10px] text-[var(--color-text-faint)]">未分配</span>
                     {/if}
                   </span>
                 </button>

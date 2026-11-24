@@ -276,7 +276,7 @@
           {
             action: 'import',
             label: '移入中心库',
-            hint: '搬进 ~/.agents/skills，原位置建链接，所有 agent 都能读到',
+            hint: '搬进 ~/.agents/skills；原位置建链接。直接读中心库的 agent 可见，其他 agent 需再建链接',
             variant: 'primary',
           },
           // 只有知道属于哪个 agent 才能标记专用 —— 专用库按 agent 分目录
@@ -350,7 +350,7 @@
     const where = `${o.location} 下的 ${o.name}`;
     switch (action) {
       case 'import':
-        return `把 ${where} 移入中心库？\n\n原位置会建一个指向中心库的链接，${o.location.split('/')[1] ?? '该 agent'} 仍然能读到这个 skill，所有 agent 都能读到。`;
+        return `把 ${where} 移入中心库？\n\n原位置会建一个指向中心库的链接，${o.location.split('/')[1] ?? '该 agent'} 仍然能读到这个 skill。其它 agent 要读到，还需要在各自目录里建链接。`;
       case 'privatize':
         return (
           `把 ${where} 标记为 ${o.agent} 专用？\n\n` +
@@ -391,7 +391,7 @@
     const where = `${m.skill}（${m.agents.join('、')} 专用）`;
     const ok = confirm(
       toShared
-        ? `取消 ${where} 的专用？\n\n· 各 agent 目录里的链接会删掉\n· 本体移进公共库 ~/.agents/skills，之后所有 agent 都能读到`
+        ? `取消 ${where} 的专用？\n\n· 各 agent 目录里的链接会删掉\n· 本体移进公共库 ~/.agents/skills；直接读中心库的 agent 可见，其他 agent 需再建链接`
         : `取消 ${where} 的专用？\n\n· 各 agent 目录里的链接会删掉\n· 本体先复制到 ~/.agents/backup/，然后删除\n· 这个删除不进 git，删了要从备份里找回来`,
     );
     if (!ok) return;
@@ -490,7 +490,7 @@
   </div>
 {/if}
 
-<!-- 范围筛选：公共（所有 agent 都能读）/ 专用（只有指定的那几只能读） -->
+<!-- 范围筛选：公共（放在中心库；支持共享目录的 agent 直接读）/ 专用（只有指定的那几只能读） -->
 <div class="mb-2 flex flex-wrap items-center gap-1.5">
   <span class="mr-1 text-[11px] text-[var(--color-text-faint)]">范围</span>
   {#each [['all', '全部'], ['public', '公共'], ['private', `专用 ${privateCount}`]] as const as [val, label] (val)}
@@ -691,7 +691,7 @@
               variant="outline"
               disabled={removing !== null}
               onclick={() => cancelPrivate(m, true)}
-              title="删掉各 agent 的链接，本体移进公共库，之后所有 agent 都能读"
+              title="删掉各 agent 的链接，本体移进公共库；直接读中心库的 agent 可见，其他 agent 需再建链接"
             >
               {removing === m.skill ? '处理中…' : '移入公共库'}
             </Button>

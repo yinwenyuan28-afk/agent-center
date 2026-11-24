@@ -51,6 +51,16 @@
   /** 已启用的 agent 数。为 0 时页面主体是引导文案而不是空表格。 */
   const enabledCount = $derived(report?.agents.filter((a) => a.enabled).length ?? 0);
 
+  /**
+   * 已启用但数据源不存在的 agent。
+   *
+   * 这类情况下 rows 一定是空的，但原因不是「没用过」，而是「读不到」。
+   * 空状态文案必须先说这个，否则用户会被误导去怀疑自己的使用记录。
+   */
+  const missingSources = $derived(
+    report?.agents.filter((a) => a.enabled && !a.available) ?? [],
+  );
+
   /** 只有实现了采集的 agent 值得展示成「可开关」的一行。 */
   const supportedAgents = $derived(report?.agents.filter((a) => a.supported) ?? []);
   const unsupportedAgents = $derived(report?.agents.filter((a) => !a.supported) ?? []);
@@ -228,12 +238,28 @@
     展开页面底部的「纳入统计的 agent」，勾选一行右侧的开关就会开始统计。
   </div>
 {:else if (report?.rows.length ?? 0) === 0}
-  <div
-    class="rounded-[var(--radius-lg)] border border-dashed border-[var(--color-border-strong)] px-6 py-12 text-center text-[13px] text-[var(--color-text-faint)]"
-  >
-    已启用的 agent 在这个时间窗内没有用量记录。<br />
-    试试切到「全部」，或者确认那家最近确实用过。
-  </div>
+  {#if missingSources.length > 0}
+    <div
+      class="rounded-[var(--radius-lg)] border border-dashed border-[var(--color-warn)] px-6 py-12 text-center text-[13px] text-[var(--color-text-muted)]"
+    >
+      已启用但数据源不存在：<span class="font-[var(--font-mono)]">{missingSources
+        .map((a) => a.agent)
+        .join(', ')}</span>。<br />
+      不是「没有用量」，而是读不到目录。确认对应工具还装着，或到页面底部改成正确目录。
+      <div class="mt-2 space-y-1 text-[11px] text-[var(--color-text-faint)]">
+        {#each missingSources as a (a.agent)}
+          <div><span class="font-[var(--font-mono)]">{a.agent}</span> → {a.source || '（未配置路径）'}</div>
+        {/each}
+      </div>
+    </div>
+  {:else}
+    <div
+      class="rounded-[var(--radius-lg)] border border-dashed border-[var(--color-border-strong)] px-6 py-12 text-center text-[13px] text-[var(--color-text-faint)]"
+    >
+      已启用的 agent 在这个时间窗内没有用量记录。<br />
+      试试切到「全部」，或者确认那家最近确实用过。
+    </div>
+  {/if}
 {:else}
   <!-- 总计 -->
   <div class="mb-4 grid grid-cols-3 gap-3">

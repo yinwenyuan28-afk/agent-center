@@ -408,12 +408,22 @@ pub fn list_agent_docs() -> Vec<AgentDoc> {
     };
     let common_len = common_text.len() as u64;
 
+    // 用户在 agentcenter.toml 里可以把某个 agent 的落点改到别处。
+    // 文档页显示的必须是**实际落点**，不能是 agent 内置的默认路径 ——
+    // 否则同一页的「映射」表格和「指令文档」标签会对同一个 agent 显示两个目标。
+    let cfg = crate::config::Config::load().ok();
+
     let mut out = Vec::new();
     for agent in crate::agents::all() {
-        let Some(target) = agent.instruction_file() else {
+        let Some(default_target) = agent.instruction_file() else {
             continue;
         };
         let id = agent.id();
+        let target = cfg
+            .as_ref()
+            .and_then(|c| c.mappings.iter().find(|m| m.agent == id))
+            .map(|m| crate::config::expand_tilde(&m.to))
+            .unwrap_or(default_target);
         let specific = specific_path(id);
         let specific_exists = specific.is_file();
 

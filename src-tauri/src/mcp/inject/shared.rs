@@ -16,9 +16,28 @@ pub const TRANSPORT_FIELDS: &[&str] = &["type", "command", "args", "cwd", "env",
 #[cfg(windows)]
 const WINDOWS_WRAP_COMMANDS: &[&str] = &["npx", "npm", "yarn", "pnpm", "node", "bun", "deno"];
 
+/// 哪些 agent 的 MCP 配置支持「停用但保留条目」。
+///
+/// 其余 agent 没有这个字段：全局停用的 server 必须从配置里删掉，
+/// 否则 Codex / Claude 等会照常加载，界面显示「全局停用」就成了假状态。
+fn keeps_disabled_entries(agent: &str) -> bool {
+    matches!(agent, "opencode" | "zcode" | "workbuddy" | "pi" | "omp")
+}
+
 /// 判断母版条目是否该分配给该 agent。
+///
+/// `enabled = false` 的条目：
+/// - 目标支持停用字段 → 仍然交给注入器，由它写 `enabled = false`
+/// - 目标不支持 → 直接排除，注入器会把它从配置里清掉
+///
+/// 不做这层过滤时，禁用只对少数 agent 生效，其它 agent 会继续注入为可用，
+/// 和界面上的「全局停用」相反。
 pub fn wanted<'a>(servers: &'a [McpServer], agent: &str) -> Vec<&'a McpServer> {
-    servers.iter().filter(|s| assigned_to(s, agent)).collect()
+    let keep_disabled = keeps_disabled_entries(agent);
+    servers
+        .iter()
+        .filter(|s| assigned_to(s, agent) && (s.enabled || keep_disabled))
+        .collect()
 }
 
 /// 从 JSON 条目推断传输方式。

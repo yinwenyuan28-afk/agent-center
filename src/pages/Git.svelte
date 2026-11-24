@@ -125,14 +125,23 @@
       </div>
       <div>
         <div class="text-[11px] text-[var(--color-text-muted)]">领先 / 落后</div>
-        <div class="flex items-center gap-3 font-[var(--font-mono)] text-[13px]">
-          <span class="flex items-center gap-0.5">
-            <ArrowUp size={12} class="text-[var(--color-text-faint)]" />{status.ahead}
-          </span>
-          <span class="flex items-center gap-0.5">
-            <ArrowDown size={12} class="text-[var(--color-text-faint)]" />{status.behind}
-          </span>
-        </div>
+        {#if status.hasUpstream}
+          <div class="flex items-center gap-3 font-[var(--font-mono)] text-[13px]">
+            <span class="flex items-center gap-0.5">
+              <ArrowUp size={12} class="text-[var(--color-text-faint)]" />{status.ahead}
+            </span>
+            <span class="flex items-center gap-0.5">
+              <ArrowDown size={12} class="text-[var(--color-text-faint)]" />{status.behind}
+            </span>
+          </div>
+        {:else}
+          <div
+            class="font-[var(--font-mono)] text-[13px] text-[var(--color-text-muted)]"
+            title="当前分支没有配置上游，git 无法计算领先/落后"
+          >
+            未设置上游
+          </div>
+        {/if}
       </div>
       <div class="min-w-0">
         <div class="text-[11px] text-[var(--color-text-muted)]">远端</div>
@@ -146,8 +155,15 @@
           <RefreshCw size={13} />
           刷新
         </Button>
-        <Button size="sm" onclick={push} disabled={busy || status.ahead === 0}>
-          推送（{status.ahead}）
+        <Button
+          size="sm"
+          onclick={push}
+          disabled={busy || status.ahead === 0}
+          title={status.hasUpstream
+            ? `推送 ${status.ahead} 个提交`
+            : '当前分支没有配置上游，先设置 upstream 再推送'}
+        >
+          推送（{status.hasUpstream ? status.ahead : '未设上游'}）
         </Button>
       </div>
     </div>

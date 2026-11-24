@@ -64,6 +64,7 @@ pub fn status() -> GitStatus {
         return GitStatus {
             is_repo: false,
             branch: String::new(),
+            has_upstream: false,
             ahead: 0,
             behind: 0,
             changed: Vec::new(),
@@ -78,10 +79,14 @@ pub fn status() -> GitStatus {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
 
-    // 领先/落后上游。用 --left-right --count 一次拿到两个数
+    // 领先/落后上游。用 --left-right --count 一次拿到两个数。
+    // 失败通常就是「当前分支没配上游」；两个数保持 0 并显式标记，
+    // 界面对这种情况要显示「未设置上游」，不能显示成「领先 0」。
     let (mut ahead, mut behind) = (0usize, 0usize);
+    let mut has_upstream = false;
     if let Ok(o) = git(&["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]) {
         if o.status.success() {
+            has_upstream = true;
             let text = String::from_utf8_lossy(&o.stdout);
             let mut parts = text.split_whitespace();
             ahead = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -120,6 +125,7 @@ pub fn status() -> GitStatus {
     GitStatus {
         is_repo: true,
         branch,
+        has_upstream,
         ahead,
         behind,
         changed,

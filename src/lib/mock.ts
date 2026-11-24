@@ -253,6 +253,7 @@ const managed: ManagedSkill[] = [
 const gitStatus: GitStatus = {
   isRepo: true,
   branch: 'master',
+  hasUpstream: true,
   ahead: 0,
   behind: 0,
   changed: [],

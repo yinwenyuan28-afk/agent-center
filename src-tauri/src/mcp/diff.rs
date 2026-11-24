@@ -11,11 +11,11 @@ pub fn compare(master: &[McpServer], scans: &[McpAgentScan]) -> McpDiffReport {
     let mut changed_files = 0usize;
 
     for scan in scans {
-        // 该 agent 的母版意图
-        let wanted: Vec<&McpServer> = master
-            .iter()
-            .filter(|m| m.agents.iter().any(|a| a == &scan.agent))
-            .collect();
+        // 该 agent 的母版意图。用注入器同一套过滤规则：
+        // 全局停用且目标不支持停用字段的，不应算作「应该存在」，
+        // 否则 diff 会一直建议注入一个 sync 根本不会写的条目。
+        let wanted: Vec<&McpServer> =
+            crate::mcp::inject::shared::wanted(master, &scan.agent);
 
         if wanted.is_empty() && scan.servers.is_empty() {
             continue;

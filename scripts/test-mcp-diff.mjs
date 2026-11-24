@@ -5,17 +5,21 @@
 // 用法：node scripts/test-mcp-diff.mjs
 
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const EXE = 'C:/dev/code/agentcenter/src-tauri/target/debug/agentcenter.exe';
 const MASTER = 'C:/Users/leaf/.agents/mcp.toml';
 
-// 备份已有母版
-if (existsSync(MASTER)) {
+// 备份已有母版。测试结束后必须恢复 —— 这个脚本会用测试数据覆盖真实母版，
+// 不恢复的话用户下一次 sync 会把真实配置改坏。
+const hadMaster = existsSync(MASTER);
+if (hadMaster) {
   copyFileSync(MASTER, MASTER + '.bak');
   console.log('已备份现有 mcp.toml');
 }
+
+try {
 
 // 用真实存在的 4 个 server 造母版，验证 diff 能否正确识别「已一致」
 const master = `[[server]]
@@ -74,4 +78,14 @@ try {
 } catch (e) {
   console.log(e.stdout || '');
   console.log('stderr:', e.stderr || '');
+}
+} finally {
+  if (hadMaster) {
+    copyFileSync(MASTER + '.bak', MASTER);
+    rmSync(MASTER + '.bak', { force: true });
+    console.log('\n已恢复原 mcp.toml');
+  } else {
+    rmSync(MASTER, { force: true });
+    console.log('\n已删除测试用 mcp.toml');
+  }
 }
