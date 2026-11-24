@@ -499,17 +499,49 @@ impl Injector for CodexInjector {
                         summary.push(format!("清除 model_provider（{current} 已取消分配）"));
                     }
                 }
-                // 我们那张表里不再留真实 key
-                if let Some(t) = doc
-                    .get_mut("model_providers")
-                    .and_then(|i| i.as_table_mut())
-                    .and_then(|t| t.get_mut(ROUTE_ID))
-                    .and_then(|i| i.as_table_mut())
-                {
-                    if t.remove("experimental_bearer_token").is_some() {
-                        changed = true;
-                        summary.push("移除 custom 表里的旧密钥".to_string());
+
+                // 取消分配后，custom 表里的内容全部是本工具写的，不能只删密钥 ——
+                // 留着 name/base_url/wire_api 会让文件里看起来「还在用这个 provider」。
+                // 这里按本工具写入过的键逐个清；用户自己加的键（如 http_headers）
+                // 保留。清空后连表一起删，避免留下空壳。
+                let mut remove_table = false;
+                let mut remove_group = false;
+                if let Some(tables) = doc.get_mut("model_providers").and_then(|i| i.as_table_mut()) {
+                    if let Some(t) = tables.get_mut(ROUTE_ID).and_then(|i| i.as_table_mut()) {
+                        let before = t.len();
+                        for key in [
+                            "name",
+                            "base_url",
+                            "wire_api",
+                            "experimental_bearer_token",
+                            "requires_openai_auth",
+                            "supports_websockets",
+                            "model_catalog_url",
+                            // 早期实现的写法
+                            "env_key",
+                        ] {
+                            t.remove(key);
+                        }
+                        if t.len() != before {
+                            changed = true;
+                            summary.push(format!(
+                                "移除 model_providers.{ROUTE_ID} 里本工具写入的字段"
+                            ));
+                        }
+                        remove_table = t.is_empty();
                     }
+                    if remove_table {
+                        tables.remove(ROUTE_ID);
+                        changed = true;
+                        summary.push(format!(
+                            "移除空的 model_providers.{ROUTE_ID} 表（Codex 未分配 provider）"
+                        ));
+                    }
+                    remove_group = tables.is_empty();
+                }
+                if remove_group && doc.remove("model_providers").is_some() {
+                    changed = true;
+                    summary.push("移除空的 model_providers 表".to_string());
                 }
             }
         }

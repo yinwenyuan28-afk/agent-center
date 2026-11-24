@@ -185,6 +185,19 @@ const out2 = run();
 console.log(out2);
 check('第二次同步零写入', /完成：写入 0 个文件/.test(out2), out2.match(/完成：.*/)?.[0] ?? '');
 
+// ---------------------------------------------------------------- 取消 Codex 分配
+console.log('\n取消 Codex 分配后…');
+const masterNoCodex = master
+  .replace('agents = ["claude", "codex"]', 'agents = ["claude"]')
+  .replace(/\[\[provider\]\]\nid = "codex-alt"[\s\S]*$/, '');
+writeFileSync(join(TEST, '.agents/providers.toml'), masterNoCodex, 'utf8');
+const out3 = run();
+console.log(out3);
+const codexCleared = readFileSync(join(codexDir, 'config.toml'), 'utf8');
+check('custom 表已移除', !codexCleared.includes('[model_providers.custom]'));
+check('model_provider 已清除', !/^model_provider\s*=/m.test(codexCleared));
+check('用户表仍保留', codexCleared.includes('[mcp_servers'));
+
 // ---------------------------------------------------------------- 汇总
 console.log('\n=== 汇总 ===');
 const failed = results.filter((r) => !r.ok);

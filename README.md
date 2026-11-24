@@ -264,6 +264,9 @@ agentcenter providers set <id> --codex-model-catalog-url https://example.com/v1/
 
 不传这两个设置就不写对应的键；取消时注入器会把键删掉，恢复 Codex 默认。
 
+取消 Codex 的 provider 分配后，注入器会清掉 `[model_providers.custom]` 里本工具写入的字段；
+表清空后整表删除（`[model_providers]` 也空了就一起删）。你手工加在表里的 `http_headers` 等键会保留。
+
 `model_reasoning_effort` 另有一个坑：这个值会被原样放进请求体的
 `reasoning.effort`，上游只接受 `none|minimal|low|medium|high|xhigh|max`。母版里的
 写法不一定对得上（比如 CommandCode 的 mimo 写的是 `enabled`），原样写进去每次请求

@@ -209,6 +209,7 @@ model_catalog_url = "https://.../models"  # 母版填了才写，不填删键
 - 早期实现按母版 id 建表、用 `env_key` + `~/.agents/codex-env.ps1`。这一轮改掉了：单槽位 + 内联 token，不再生成脚本
 - 旧形态留下的表（表名是母版里出现过的 id、且不是 `custom`）会被清掉，否则 `env_key` 会和新的 token 并存
 - 已有 `custom` 表时只改本工具声明管的键，`http_headers`、`query_params` 保留
+- 取消 Codex 分配时，会清掉 `custom` 表里本工具写入的字段（name/base_url/wire_api/key/requires_openai_auth/supports_websockets/model_catalog_url）；清空后整表删除，`model_providers` 也空了就一起删。用户自己加的键会让表保留下来
 
 ### 关掉 WebSocket 重连、补模型目录
 
