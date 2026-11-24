@@ -194,7 +194,7 @@ zcode = "anthropic"
 | agent | 文件 | 写法 | 槽位 | 支持的协议 |
 |---|---|---|---|---|
 | claude | `~/.claude/settings.json` | `env` 里写 `ANTHROPIC_*` 等；上游不是 Anthropic 协议时把 `ANTHROPIC_BASE_URL` 指向本地转换端口 `127.0.0.1:15722`，模型名换成稳定的 `claude-*` 别名 | 单 | anthropic / openai-chat / openai-responses |
-| codex | `~/.codex/config.toml` | 一张 `[model_providers.custom]` 表，key 写 `experimental_bearer_token`；顶层 `model_provider` / `model` / `model_reasoning_effort` | 单 | 只有 openai-responses |
+| codex | `~/.codex/config.toml` | 一张 `[model_providers.custom]` 表，key 写 `experimental_bearer_token`；顶层 `model_provider` / `model` / `model_reasoning_effort`；表内可选 `supports_websockets` / `model_catalog_url` | 单 | 只有 openai-responses |
 | zcode | `~/.zcode/v2/config.json` + `~/.zcode/v2/provider_config.json` | 两份同步写。键是 UUID，不是母版 id，所以**用 base_url 认身份**。`provider_config.json` 才是设置页「自定义供应商」真正读的 | 多 | 全部 |
 | pi | `~/.pi/agent/models.json` | `providers.<id>` 带 `baseUrl` / `api` / `apiKey` / `models`。key 内联在这里，**不碰 `auth.json`**（那是 `/login` 的地盘） | 多 | 全部四种一对一映射 |
 | opencode | `~/.config/opencode/opencode.jsonc` 优先，否则 `opencode.json` | 按已装版本选写法：major < 2 用 V1（`provider.<id>.options.apiKey`），否则 V2（`providers.<id>.settings.apiKey`）。key 内联，**不碰** `~/.local/share/opencode/auth.json` | 多 | 全部 |
@@ -396,7 +396,7 @@ API_KEY = "..."
 | `providers list` | | 列出母版里的 provider（base_url / kind / models / agents / note） | 否 |
 | `providers diff` | | 母版 vs 各 agent 现状，含冲突项 | 否 |
 | `providers sync` | `--dry-run` | 注入到各 agent | 是 |
-| `providers set <id>` | `--name` `--base-url` `--api-key` `--kind` `--agent-kind <agent>=<kind>`（可重复） `--models a,b` `--agents a,b` `--codex-model <model>` | 新增或更新一条 provider。更新时只覆盖显式给出的字段 | 是（母版） |
+| `providers set <id>` | `--name` `--base-url` `--api-key` `--kind` `--agent-kind <agent>=<kind>`（可重复） `--models a,b` `--agents a,b` `--codex-model <model>` `--codex-websockets <bool>` `--codex-model-catalog-url <url>` | 新增或更新一条 provider。更新时只覆盖显式给出的字段 | 是（母版） |
 | `providers remove <id>` | | 从母版删除一条 | 是（母版） |
 | `providers matrix` | | 分配矩阵：每个 provider 用在哪些 agent 上 | 否 |
 | `providers assign <id>` | `--agents a,b`（省略 = 清空） | 整行设置某个 provider 的分配 | 是（母版） |
@@ -408,6 +408,7 @@ API_KEY = "..."
 - 新增时 `--name` / `--base-url` / `--api-key` 三者必填。
 - `--kind` 取值：`anthropic` / `openai-chat` / `openai-responses` / `google-generative-ai`。解析是宽容的，`openai-compatible`、`gemini`、`responses` 这类旧写法都会被接受。
 - `--codex-model` 必须出现在 `--models` 里，否则报错。Codex 的模型选择器只列它自己的官方目录，自定义 provider 的模型进不去，只能靠这个值写进 `config.toml` 顶层的 `model`。
+- `--codex-websockets false` 写 `supports_websockets = false`，避免端点不支持 WebSocket 时反复无效重连；`--codex-model-catalog-url <url>` 写 `model_catalog_url`（一般是 `<base_url>/models`），补回自定义端点的模型目录。传空串清掉目录地址。不传这两个参数就不动母版里已有的值。
 - **`providers set --agents` 不做任何校验**：它直接把列表写进母版的 `agents` 字段，既不检查 agent 名是否已知，也不做单槽位互斥。写错名字（比如 `claud`）会留在母版里，`sync` 时被静默忽略。
 - **`providers assign` 才做校验和互斥**：它先过滤掉 `provider_capable()` 之外的 agent，再对单槽位 agent（claude / codex / gemini / grok）把其它 provider 上的同名 agent 摘掉。要改分配优先用 `assign`。
 - 新增时 `--agents` 同样不过滤。

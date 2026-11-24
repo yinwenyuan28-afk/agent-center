@@ -230,7 +230,8 @@ agentcenter providers sync
 
 Codex 的模型选择器（TUI 里 `/model`）只列它自己的官方目录 —— `codex debug models`
 导出来只有 12 个 `gpt-*` 条目，自定义 provider 的模型一个都没有。原因是 provider
-表里没有「模型列表」这个字段，唯一相关的 `model_catalog_url` 还不接受第三方域名。
+表里没有「模型列表」这个字段；`model_catalog_url` 在官方表上有域名白名单，
+在 `custom` 这类自定义表上才能指向自己的地址。
 
 所以「用哪个模型」只能由 `~/.codex/config.toml` 顶层的 `model` 决定。Codex 不校验
 这个名字，会原样发给上游，找不到元数据只打一条 warning。母版里用 `codex_model`
@@ -242,6 +243,26 @@ agentcenter providers sync
 ```
 
 界面上在「启用 provider」的 Codex 卡片里，按钮叫「配置模型」。
+
+### 关掉 WebSocket 重连、补回模型目录
+
+自定义端点常有这两个毛病：Codex 尝试升级 WebSocket 失败后反复重连，回复卡住；
+模型目录拉不到，模型列表是空的。在「Claude & Codex」页的 Codex 区域打开
+**「修复连接」** 开关，会一次写好这两个键（模型目录沿用已有值，没有就按
+`<base_url>/models` 推导）：
+
+- 关 WebSocket：写 `[model_providers.*].supports_websockets = false`，只走 HTTP
+- 补模型目录：写 `model_catalog_url`，一般是 `<base_url>/models`；
+  指向 ChatGPT 后端时是 `https://chatgpt.com/backend-api/codex/models`
+
+关闭开关会把两个键一起删掉，恢复 Codex 默认。命令行仍可以单独设置：
+
+```bash
+agentcenter providers set <id> --codex-websockets false
+agentcenter providers set <id> --codex-model-catalog-url https://example.com/v1/models
+```
+
+不传这两个设置就不写对应的键；取消时注入器会把键删掉，恢复 Codex 默认。
 
 `model_reasoning_effort` 另有一个坑：这个值会被原样放进请求体的
 `reasoning.effort`，上游只接受 `none|minimal|low|medium|high|xhigh|max`。母版里的

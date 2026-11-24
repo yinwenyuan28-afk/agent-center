@@ -13,6 +13,7 @@ import type {
   BackfillReport,
   ClaudeModelMap,
   ClaudeOnboardingStatus,
+  CodexConnectionStatus,
   CollectPlan,
   CredentialOverview,
   CursorByokPlan,
@@ -230,6 +231,10 @@ export const saveProvider = (p: {
   codexRequiresOpenaiAuth: boolean | null;
   /** Codex 用哪个模型；null 表示回退到 models 的第一个 */
   codexModel: string | null;
+  /** Codex 的 WebSocket 开关；null 表示不写这个键 */
+  codexSupportsWebsockets: boolean | null;
+  /** Codex 的模型目录地址；null / 空串表示不写这个键 */
+  codexModelCatalogUrl: string | null;
   note: string;
 }) =>
   call<RunResult>('save_provider', {
@@ -243,6 +248,8 @@ export const saveProvider = (p: {
     agentKinds: p.agentKinds,
     codexRequiresOpenaiAuth: p.codexRequiresOpenaiAuth,
     codexModel: p.codexModel,
+    codexSupportsWebsockets: p.codexSupportsWebsockets,
+    codexModelCatalogUrl: p.codexModelCatalogUrl,
     note: p.note,
   });
 
@@ -306,6 +313,56 @@ export const setCodexRequiresOpenaiAuth = (providerId: string, value: boolean | 
  */
 export const setCodexModel = (providerId: string, model: string | null) =>
   call<RunResult>('set_codex_model', { providerId, model });
+
+/**
+ * 读 Codex 配置文件里 `[model_providers.custom]` 的连接参数。
+ *
+ * 界面的「连接设置」用它做默认值，保证显示的是盘上实际配置。
+ */
+export const codexConnectionStatus = () =>
+  call<CodexConnectionStatus>('codex_connection_status');
+
+/**
+ * 直接改 Codex 配置文件里当前生效 provider 表的连接参数。
+ *
+ * 不经过母版，也不需要母版里分配过 provider —— 这两个键只影响 Codex
+ * 自己的连接行为。null 表示删掉对应的键。
+ */
+export const setCodexConnectionDirect = (
+  supportsWebsockets: boolean | null,
+  modelCatalogUrl: string | null,
+) =>
+  call<RunResult>('set_codex_connection_direct', {
+    supportsWebsockets,
+    modelCatalogUrl,
+  });
+
+/**
+ * 直接改 Codex 配置文件里当前生效 provider 表的 `requires_openai_auth`。
+ *
+ * 不经过母版。value 为 null 表示删掉这个键，交给 Codex 自动判断。
+ */
+export const setCodexRequiresOpenaiAuthDirect = (value: boolean | null) =>
+  call<RunResult>('set_codex_requires_openai_auth_direct', { value });
+
+/**
+ * 设置某个 provider 分配给 Codex 时的连接参数，并立刻只重写 Codex 的配置。
+ *
+ * - `supportsWebsockets`：false 关闭 WebSocket，避免端点不支持时反复无效重连；
+ *   null 表示不写这个键
+ * - `modelCatalogUrl`：Codex 拉模型目录的地址，一般是 `<baseUrl>/models`；
+ *   null / 空串表示不写这个键
+ */
+export const setCodexConnection = (
+  providerId: string,
+  supportsWebsockets: boolean | null,
+  modelCatalogUrl: string | null,
+) =>
+  call<RunResult>('set_codex_connection', {
+    providerId,
+    supportsWebsockets,
+    modelCatalogUrl,
+  });
 
 // ---- Cursor 的自带密钥（BYOK） ----
 //

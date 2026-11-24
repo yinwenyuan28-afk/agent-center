@@ -1609,6 +1609,8 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                             "agents": p.agents,
                             "codexModel": p.codex_model,
                             "codexRequiresOpenaiAuth": p.codex_requires_openai_auth,
+                            "codexSupportsWebsockets": p.codex_supports_websockets,
+                            "codexModelCatalogUrl": p.codex_model_catalog_url,
                             // 只给长度和末尾 4 位，和界面一致：密钥原文不出这个进程
                             "keyLen": p.api_key.len(),
                             "keyTail": p.api_key.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>(),
@@ -1642,6 +1644,12 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                 println!("  agents    {}", if p.agents.is_empty() { "-".into() } else { p.agents.join(", ") });
                 if !p.note.is_empty() {
                     println!("  note      {}", p.note);
+                }
+                if let Some(ws) = p.codex_supports_websockets {
+                    println!("  codex ws  supports_websockets = {ws}");
+                }
+                if let Some(url) = &p.codex_model_catalog_url {
+                    println!("  codex cat {url}");
                 }
                 println!();
             }
@@ -1783,6 +1791,8 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
             models,
             agents,
             codex_model,
+            codex_websockets,
+            codex_model_catalog_url,
         } => {
             let mut list = match store::load_or_default() {
                 Ok(l) => l,
@@ -1845,6 +1855,14 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                         return 1;
                     }
                 }
+                if let Some(v) = codex_websockets {
+                    existing.codex_supports_websockets = Some(v);
+                }
+                if let Some(url) = codex_model_catalog_url {
+                    // 空串表示清掉这个键，不是写成空地址
+                    let url = url.trim().to_string();
+                    existing.codex_model_catalog_url = if url.is_empty() { None } else { Some(url) };
+                }
             } else {
                 // 新增：必填字段缺了就报错
                 let (Some(n), Some(b), Some(k)) = (name, base_url, api_key) else {
@@ -1900,6 +1918,10 @@ fn run_providers(cmd: crate::cli::ProvidersCmd) -> i32 {
                     // 的 codex_requires_openai_auth，或走界面上的 Codex 配置
                     codex_requires_openai_auth: None,
                     codex_model: picked,
+                    codex_supports_websockets: codex_websockets,
+                    codex_model_catalog_url: codex_model_catalog_url
+                        .map(|u| u.trim().to_string())
+                        .filter(|u| !u.is_empty()),
                     note: String::new(),
                 });
             }

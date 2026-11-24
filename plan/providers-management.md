@@ -654,9 +654,10 @@ providers assign alpha --agents claude,pi  # beta 的 claude 自动消失
 - **单槽位的说明按 agent 分开写**。Claude 是因为只有一组 `ANTHROPIC_*` 环境变量，
   Codex 是只认一张 `model_providers` 表，两者原因不同。
 - **特殊操作统一放在勾选列表下面的说明行**，不塞进标题行：
-  Claude 有「首次引导设置」和「配置档位映射」，Codex 有「后端开关」。
-  前两个改 `~/.claude.json` 和 `claude_model_map`，第三个改
-  `requires_openai_auth`，都在侧栏「Claude & Codex」页或映射弹窗里完成。
+  Claude 有「首次引导设置」和「配置档位映射」，Codex 有「配置模型」「后端开关」
+  「连接设置」。前两个改 `~/.claude.json` 和 `claude_model_map`；Codex 的三个
+  依次改顶层 `model`、`requires_openai_auth`、`supports_websockets` /
+  `model_catalog_url`，都在「启用 provider」的 Codex 卡片里就地完成。
 
 ### agent 顺序条
 

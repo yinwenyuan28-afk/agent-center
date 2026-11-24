@@ -227,6 +227,8 @@ fn codex_model_prefers_explicit_pick() {
         claude_model_map: Default::default(),
         codex_requires_openai_auth: None,
         codex_model: None,
+        codex_supports_websockets: None,
+        codex_model_catalog_url: None,
         note: String::new(),
     };
 

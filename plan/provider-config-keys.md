@@ -201,12 +201,55 @@ base_url = "https://..."
 wire_api = "responses"
 experimental_bearer_token = "sk-..."
 requires_openai_auth = false
+supports_websockets = false        # 母版填了才写，不填删键
+model_catalog_url = "https://.../models"  # 母版填了才写，不填删键
 ```
 
 - `wire_api` 无论母版协议是什么都写 `responses` —— Codex 只支持这一种
 - 早期实现按母版 id 建表、用 `env_key` + `~/.agents/codex-env.ps1`。这一轮改掉了：单槽位 + 内联 token，不再生成脚本
 - 旧形态留下的表（表名是母版里出现过的 id、且不是 `custom`）会被清掉，否则 `env_key` 会和新的 token 并存
 - 已有 `custom` 表时只改本工具声明管的键，`http_headers`、`query_params` 保留
+
+### 关掉 WebSocket 重连、补模型目录
+
+两个键都只在母版明确填了才写；不填就把文件里对应的键删掉，恢复 Codex 默认。
+
+**`supports_websockets`**：Codex 拿到流式响应后会尝试把连接升级成 WebSocket。
+端点不支持时（大量第三方中转都这样），它会失败、重连、再失败，日志里刷一串
+无效重连，表现是回复迟迟不出来。写 `false` 后只走 HTTP，问题消失。
+
+**`model_catalog_url`**：Codex 默认只从官方地址拉模型目录，自定义端点拉不到时
+模型列表就是空的。补一个能返回 OpenAI 模型列表 JSON 的地址即可，通常是
+`<base_url>/models`；指向 ChatGPT 后端时是
+`https://chatgpt.com/backend-api/codex/models`。
+
+注意：这个字段在 `[model_providers.openai]` 这类官方表上有域名白名单
+（只能用 ChatGPT 主机），在 `custom` 这类自定义表上没有限制。
+
+母版字段是三态：
+
+| 母版值 | 写入 | 含义 |
+|---|---|---|
+| 不写（`None`） | 删除该键 | 回到 Codex 默认 |
+| `codex_supports_websockets = false` / `true` | 写对应布尔值 | 关 / 开 WebSocket |
+| `codex_model_catalog_url = "https://..."` | 写这个地址 | 用这个目录 |
+
+界面上在「启用 provider」的 Codex 卡片里，按钮叫「连接设置」，两个键可以分别设。
+「Claude & Codex」页的 **「修复连接」** 开关则把两件事合成一步：开启时一次写
+`supports_websockets = false` 和 `model_catalog_url`（目录沿用已有值，没有就按
+`<base_url>/models` 推导），关闭时两个键一起删掉。它**直接写 config.toml**：
+目标表由顶层 `model_provider` 决定（不是写死 `custom`），所以不需要先在
+母版里分配 provider，也不依赖本工具的 provider 管理。页面显示的值同样读自
+config.toml，用户手动改过也能对上。
+命令行：
+
+```bash
+agentcenter providers set <id> --codex-websockets false
+agentcenter providers set <id> --codex-model-catalog-url https://example.com/v1/models
+# 传空串清掉目录地址
+agentcenter providers set <id> --codex-model-catalog-url ""
+```
+
 
 ### 用哪个模型：只能靠顶层 `model`，而且不能靠 Codex 的选择器
 
@@ -284,8 +327,10 @@ Codex 没有界面开关，路由到 ChatGPT 后端的行为**完全**由这个�
 
 写 `true` 而盘上没有登录时，Codex 会卡在登录页。所以自动模式的默认值跟着登录态走。
 
-界面上这个开关在侧栏的 **Claude & Codex** 页里。Codex 是单槽位，同一时刻只有一条
-provider 生效，所以那一页只显示当前分配给 Codex 的那一条。
+界面上这个开关在侧栏的 **Claude & Codex** 页里。它直接读写 `config.toml`
+当前生效的表（表名取顶层 `model_provider`，不是写死 `custom`），所以显示值
+和文件一致；「自动」表示删掉这个键，交给 Codex 判断。Provider 页的「后端开关」
+弹窗仍然走母版 + 注入器，是「provider 级设置」，两者不要混用。
 
 > 查找：CC Switch `src-tauri/src/live/floor.rs` 的 `CODEX_FLOOR_TOP`，`src-tauri/src/live/project/codex.rs` 的 `ROUTE_ID = "custom"` 与 `requires_openai_auth()`。我们 `src-tauri/src/providers/codex.rs`。
 

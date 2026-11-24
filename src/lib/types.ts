@@ -195,6 +195,8 @@ export interface GitStatus {
   /** 是否为 git 仓库 */
   isRepo: boolean;
   branch: string;
+  /** 当前分支是否配置了上游。false 时 ahead/behind 没有意义 */
+  hasUpstream: boolean;
   /** 相对上游领先的提交数 */
   ahead: number;
   /** 落后上游的提交数 */
@@ -370,6 +372,18 @@ export interface ProviderView {
    * 所以只能靠这个字段决定用哪个。null 表示回退到 `models` 的第一个。
    */
   codexModel: string | null;
+  /**
+   * Codex 是否启用 WebSocket（`supports_websockets`）。
+   *
+   * null 表示不写这个键；false 关闭 WebSocket，避免端点不支持时反复无效重连。
+   */
+  codexSupportsWebsockets: boolean | null;
+  /**
+   * Codex 拉模型目录的地址（`model_catalog_url`），一般是 `<baseUrl>/models`。
+   *
+   * null 表示不写这个键。
+   */
+  codexModelCatalogUrl: string | null;
   note: string;
   /**
    * key 明文原文。
@@ -382,6 +396,28 @@ export interface ProviderView {
   keyLen: number;
   /** key 末尾 4 位 */
   keyTail: string;
+}
+
+/**
+ * Codex 连接参数的实际状态，读自 `~/.codex/config.toml`。
+ *
+ * 界面用它预填「连接设置」：显示值以盘上为准，母版只作为写入记录。
+ */
+export interface CodexConnectionStatus {
+  /** 配置文件是否存在 */
+  available: boolean;
+  /** 实际读写的文件路径 */
+  path: string;
+  /** 当前生效的 provider 表名；null 表示表不存在，控件应禁用 */
+  providerId: string | null;
+  /** 表里的 base_url，用来猜模型目录地址 */
+  baseUrl: string | null;
+  /** 当前 supports_websockets；null 表示文件里没写这个键 */
+  supportsWebsockets: boolean | null;
+  /** 当前 model_catalog_url；null 表示文件里没写这个键 */
+  modelCatalogUrl: string | null;
+  /** 当前 requires_openai_auth；null 表示没写（Codex 自动判断） */
+  requiresOpenaiAuth: boolean | null;
 }
 
 /**

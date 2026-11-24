@@ -461,6 +461,8 @@ fn list_providers_inner() -> Result<Vec<crate::types::ProviderView>, String> {
                 claude_model_map: p.claude_model_map,
                 codex_requires_openai_auth: p.codex_requires_openai_auth,
                 codex_model: p.codex_model,
+                codex_supports_websockets: p.codex_supports_websockets,
+                codex_model_catalog_url: p.codex_model_catalog_url,
                 note: p.note,
                 key_len: p.api_key.len(),
                 key_tail: if p.api_key.len() >= 4 { tail } else { String::new() },
@@ -498,6 +500,11 @@ pub fn save_provider(
     // Codex 用哪个模型。null 表示沿用 models 的第一个。
     // 和上面的开关一样，前端每次保存都要原样带回。
     codex_model: Option<String>,
+    // Codex 的 WebSocket 开关。null / 缺省表示不写这个键。
+    // 前端每次保存都要原样带回，否则改别的字段会把这个设置洗掉。
+    codex_supports_websockets: Option<bool>,
+    // Codex 的模型目录地址。null / 空白表示不写这个键。
+    codex_model_catalog_url: Option<String>,
     note: String,
 ) -> Result<RunResult, String> {
     let mut list = crate::providers::store::load_or_default().map_err(|e| e.to_string())?;
@@ -526,6 +533,8 @@ pub fn save_provider(
             existing.models = models;
             existing.agents = agents;
             existing.codex_requires_openai_auth = codex_requires_openai_auth;
+            existing.codex_supports_websockets = codex_supports_websockets;
+            existing.codex_model_catalog_url = clean_catalog_url(codex_model_catalog_url);
             // 只接受还存在于 models 里的名字，避免编辑模型列表后留下悬空引用
             existing.codex_model = codex_model.filter(|m| {
                 !m.trim().is_empty() && existing.models.iter().any(|x| x.id == *m)
@@ -553,6 +562,8 @@ pub fn save_provider(
                 claude_model_map: crate::types::ClaudeModelMap::default(),
                 codex_requires_openai_auth,
                 codex_model: picked,
+                codex_supports_websockets,
+                codex_model_catalog_url: clean_catalog_url(codex_model_catalog_url),
                 note,
             });
         }
@@ -733,6 +744,85 @@ pub fn set_codex_model(provider_id: String, model: Option<String>) -> Result<Run
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty());
     set_codex_field(provider_id, |p| p.codex_model = clean)
+}
+
+/// 把模型目录地址规范成「要么是一段非空字符串，要么是 None」。
+///
+/// 界面上的空输入框、只打了空格，语义都是「不写这个键」，不能把空串
+/// 原样写进 config.toml —— Codex 会拿它发请求，直接失败。
+fn clean_catalog_url(url: Option<String>) -> Option<String> {
+    url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty())
+}
+
+/// 读 Codex 配置文件里当前生效 provider 表的连接参数。
+///
+/// 界面的「连接设置」用它做默认值：以盘上实际值为准，母版只作为写入记录。
+/// 这样用户手动改过 config.toml 后，界面显示的和真实配置一致。
+#[tauri::command]
+pub fn codex_connection_status() -> Result<crate::types::CodexConnectionStatus, String> {
+    let disk = crate::providers::codex::read_connection_on_disk();
+    Ok(crate::types::CodexConnectionStatus {
+        available: disk.available,
+        path: crate::config::contract_tilde(&crate::providers::codex::config_path_on_disk()),
+        provider_id: disk.provider_id,
+        base_url: disk.base_url,
+        supports_websockets: disk.supports_websockets,
+        model_catalog_url: disk.model_catalog_url,
+        requires_openai_auth: disk.requires_openai_auth,
+    })
+}
+
+/// 直接改 Codex 配置文件里当前生效 provider 表的连接参数。
+///
+/// 和 [`set_codex_connection`] 的区别：这一条**不经过母版**，也不需要
+/// 母版里有分配给 Codex 的 provider。`supports_websockets` 这类键只影响
+/// Codex 自己的连接行为，用户可能完全没用本工具管 provider。
+#[tauri::command]
+pub fn set_codex_connection_direct(
+    supports_websockets: Option<bool>,
+    model_catalog_url: Option<String>,
+) -> Result<RunResult, String> {
+    let catalog = clean_catalog_url(model_catalog_url);
+    match crate::providers::codex::set_connection_direct(supports_websockets, catalog) {
+        Ok(lines) => Ok(RunResult::success(lines.join("\n"))),
+        Err(e) => Ok(RunResult::failure(1, e.to_string())),
+    }
+}
+
+/// 直接改 Codex 配置文件里当前生效 provider 表的 `requires_openai_auth`。
+///
+/// 和 [`set_codex_requires_openai_auth`] 的区别：不经过母版，也不需要
+/// 母版里有分配给 Codex 的 provider。`value = None` 表示删掉这个键，
+/// 交回 Codex 按盘上登录态自动判断。
+#[tauri::command]
+pub fn set_codex_requires_openai_auth_direct(value: Option<bool>) -> Result<RunResult, String> {
+    match crate::providers::codex::set_requires_openai_auth_direct(value) {
+        Ok(lines) => Ok(RunResult::success(lines.join("\n"))),
+        Err(e) => Ok(RunResult::failure(1, e.to_string())),
+    }
+}
+
+/// 设置某个 provider 分配给 Codex 时的连接参数，并立刻写入 Codex 配置。
+///
+/// 管两个键：
+/// - `supports_websockets`：`Some(false)` 关掉 WebSocket，避免端点不支持时
+///   反复无效重连；`Some(true)` 显式打开；`None` 表示不写这个键
+/// - `model_catalog_url`：Codex 拉模型目录的地址，一般是 `<base_url>/models`；
+///   `None` / 空白表示不写
+///
+/// 和 [`set_codex_requires_openai_auth`] 一样只改母版这一条、只重写 codex
+/// 一家，不跑全量 sync。
+#[tauri::command]
+pub fn set_codex_connection(
+    provider_id: String,
+    supports_websockets: Option<bool>,
+    model_catalog_url: Option<String>,
+) -> Result<RunResult, String> {
+    let catalog = clean_catalog_url(model_catalog_url);
+    set_codex_field(provider_id, |p| {
+        p.codex_supports_websockets = supports_websockets;
+        p.codex_model_catalog_url = catalog;
+    })
 }
 
 /// 改 Codex 相关的单个字段，然后只重写 `~/.codex/config.toml`。

@@ -91,6 +91,235 @@ fn login_on_disk() -> bool {
     json.get("tokens").map(|t| !t.is_null()).unwrap_or(false)
 }
 
+/// Codex 配置文件路径，给界面展示用。
+pub fn config_path_on_disk() -> PathBuf {
+    CodexInjector::config_path()
+}
+
+/// `~/.codex/config.toml` 里当前生效 provider 表的连接参数。
+///
+/// 读盘结果，供界面显示和预填。`provider_id` 是表名（顶层 `model_provider`
+/// 的值），`None` 表示表不存在，此时界面禁用写入控件。
+#[derive(Debug, Clone, Default)]
+pub struct DiskConnection {
+    /// 配置文件是否存在
+    pub available: bool,
+    /// 当前生效的表名，如 `custom` / `openai_http`
+    pub provider_id: Option<String>,
+    /// 表里的 base_url，用来猜模型目录地址
+    pub base_url: Option<String>,
+    /// 当前 `supports_websockets`；`None` 表示文件里没写这个键
+    pub supports_websockets: Option<bool>,
+    /// 当前 `model_catalog_url`；`None` 表示文件里没写这个键
+    pub model_catalog_url: Option<String>,
+    /// 当前 `requires_openai_auth`；`None` 表示文件里没写这个键（交给 Codex 自动判断）
+    pub requires_openai_auth: Option<bool>,
+}
+
+/// 读盘上「当前生效的 provider 表」的连接参数。
+///
+/// 表名取顶层 `model_provider`，不写死 `custom` —— 用户可能按 Codex 官方
+/// 写法自己命名表（如 `openai_http`）。没有顶层键时视为「没有生效表」，
+/// 不回退任何默认名。
+pub fn read_connection_on_disk() -> DiskConnection {
+    let path = CodexInjector::config_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return DiskConnection::default();
+    };
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return DiskConnection {
+            available: true,
+            ..Default::default()
+        };
+    };
+    // 顶层 model_provider 才是「当前生效」的唯一声明。
+    // 没有它时不回退到 custom —— 那样会把一张可能没被使用的表冒充成生效表。
+    let Some(route) = doc.get("model_provider").and_then(|v| v.as_str()) else {
+        return DiskConnection {
+            available: true,
+            ..Default::default()
+        };
+    };
+    let route = route.to_string();
+    let table = doc
+        .get("model_providers")
+        .and_then(|i| i.as_table())
+        .and_then(|t| t.get(&route))
+        .and_then(|i| i.as_table());
+    match table {
+        Some(t) => DiskConnection {
+            available: true,
+            provider_id: Some(route),
+            base_url: t
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            supports_websockets: t.get("supports_websockets").and_then(|v| v.as_bool()),
+            model_catalog_url: t
+                .get("model_catalog_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            requires_openai_auth: t
+                .get("requires_openai_auth")
+                .and_then(|v| v.as_bool()),
+        },
+        None => DiskConnection {
+            available: true,
+            ..Default::default()
+        },
+    }
+}
+
+/// 改当前生效 provider 表里的键，不经过母版。
+///
+/// 只动 `apply` 里明确处理的键；表内其它字段、注释、行尾风格全部保留。
+/// 没有变化时不写盘，返回「已是最新」。
+fn edit_active_table(
+    apply: impl FnOnce(&mut toml_edit::Table) -> Vec<String>,
+) -> anyhow::Result<Vec<String>> {
+    let path = CodexInjector::config_path();
+    if !path.exists() {
+        anyhow::bail!("{} 不存在，先让 Codex 生成配置文件", path.display());
+    }
+
+    let orig = std::fs::read_to_string(&path)?;
+    let pre = hash_file(&path)?;
+    let uses_crlf = orig.contains("\r\n");
+    let had_trailing_newline = orig.ends_with('\n');
+
+    let mut doc: toml_edit::DocumentMut = orig.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "{} 解析失败（{}），已中止，不会写入",
+            path.display(),
+            e
+        )
+    })?;
+
+    let Some(route) = doc.get("model_provider").and_then(|v| v.as_str()) else {
+        anyhow::bail!(
+            "{} 里没有顶层 model_provider，无法确定当前生效的是哪张表",
+            path.display()
+        );
+    };
+    let route = route.to_string();
+
+    let table = doc
+        .get_mut("model_providers")
+        .and_then(|i| i.as_table_mut())
+        .and_then(|t| t.get_mut(&route))
+        .and_then(|i| i.as_table_mut())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "config.toml 里没有生效的 [model_providers.{route}] 表，没有可以写的地方"
+            )
+        })?;
+
+    let lines = apply(table);
+
+    if lines.is_empty() {
+        return Ok(vec![format!("[model_providers.{route}] 已是最新")]);
+    }
+
+    // 恢复原来的行尾风格和末尾换行（toml_edit 都不保留）
+    let mut content = doc.to_string();
+    if uses_crlf {
+        content = content.replace("\r\n", "\n").replace('\n', "\r\n");
+    }
+    if !had_trailing_newline {
+        while content.ends_with('\n') || content.ends_with("\r\n") {
+            if content.ends_with("\r\n") {
+                content.truncate(content.len() - 2);
+            } else {
+                content.truncate(content.len() - 1);
+            }
+        }
+    }
+
+    super::safe_write::safe_write(&path, &content, &pre)?;
+
+    let mut out = vec![format!(
+        "写入 {} 的 [model_providers.{route}]",
+        contract_tilde(&path)
+    )];
+    out.extend(lines);
+    Ok(out)
+}
+
+/// 直接改当前生效 provider 表的两个连接键，不经过母版。
+///
+/// 给「Claude & Codex」页用：这两个键只影响 Codex 自己的连接行为，
+/// 和「母版里分配给 Codex 的是哪条 provider」是两件事。用户可能压根没用
+/// 本工具管理 provider，但 config.toml 里已经有生效的表（如 `openai_http`）。
+///
+/// 目标表名取顶层 `model_provider`；没有顶层键时报错，不猜默认表。
+pub fn set_connection_direct(
+    supports_websockets: Option<bool>,
+    model_catalog_url: Option<String>,
+) -> anyhow::Result<Vec<String>> {
+    let want_catalog = model_catalog_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    edit_active_table(|table| {
+        let mut lines = Vec::new();
+
+        match supports_websockets {
+            Some(v) => {
+                if table.get("supports_websockets").and_then(|x| x.as_bool()) != Some(v) {
+                    table["supports_websockets"] = toml_edit::value(v);
+                    lines.push(format!("supports_websockets → {v}"));
+                }
+            }
+            None => {
+                if table.remove("supports_websockets").is_some() {
+                    lines.push("移除 supports_websockets（恢复 Codex 默认）".to_string());
+                }
+            }
+        }
+
+        match want_catalog.as_deref() {
+            Some(url) => {
+                if table.get("model_catalog_url").and_then(|x| x.as_str()) != Some(url) {
+                    table["model_catalog_url"] = toml_edit::value(url);
+                    lines.push(format!("model_catalog_url → {url}"));
+                }
+            }
+            None => {
+                if table.remove("model_catalog_url").is_some() {
+                    lines.push("移除 model_catalog_url（恢复 Codex 默认目录）".to_string());
+                }
+            }
+        }
+
+        lines
+    })
+}
+
+/// 直接改当前生效表的 `requires_openai_auth`，不经过母版。
+///
+/// `None` 表示删掉这个键，交回 Codex 按盘上登录态自动判断。
+pub fn set_requires_openai_auth_direct(value: Option<bool>) -> anyhow::Result<Vec<String>> {
+    edit_active_table(|table| {
+        let mut lines = Vec::new();
+        match value {
+            Some(v) => {
+                if table.get("requires_openai_auth").and_then(|x| x.as_bool()) != Some(v) {
+                    table["requires_openai_auth"] = toml_edit::value(v);
+                    lines.push(format!("requires_openai_auth → {v}"));
+                }
+            }
+            None => {
+                if table.remove("requires_openai_auth").is_some() {
+                    lines.push("移除 requires_openai_auth（交给 Codex 自动判断）".to_string());
+                }
+            }
+        }
+        lines
+    })
+}
+
 impl Injector for CodexInjector {
     fn agent(&self) -> &'static str {
         "codex"
@@ -435,6 +664,54 @@ fn write_custom_table(
             "盘上无登录，自动"
         }
     ));
+
+    // supports_websockets：母版没写就清掉，写了就按布尔值落盘。
+    //
+    // 端点不支持 WebSocket 时，Codex 会反复升级连接、失败、再重连，
+    // 表现为回复迟迟不出。关掉后只走 HTTP，日志里不再刷无效重连。
+    // 这个键也归本工具管：取消设置要真的删掉，否则用户以为恢复了默认，
+    // 实际旧值还留在表里。
+    match p.codex_supports_websockets {
+        Some(v) => {
+            if t.get("supports_websockets").and_then(|x| x.as_bool()) != Some(v) {
+                t["supports_websockets"] = toml_edit::value(v);
+                changed = true;
+                summary.push(format!("supports_websockets → {v}"));
+            }
+        }
+        None => {
+            if t.remove("supports_websockets").is_some() {
+                changed = true;
+                summary.push("移除 supports_websockets（恢复 Codex 默认）".to_string());
+            }
+        }
+    }
+
+    // model_catalog_url：不填就删键，填了就写。
+    //
+    // Codex 默认只从官方地址拉模型目录，自定义端点可能拉不到，
+    // 模型选择器就是空的。补一个返回 OpenAI 模型列表 JSON 的地址
+    // （一般是 `<base_url>/models`）即可恢复。
+    let want_catalog = p
+        .codex_model_catalog_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match want_catalog {
+        Some(url) => {
+            if t.get("model_catalog_url").and_then(|x| x.as_str()) != Some(url) {
+                t["model_catalog_url"] = toml_edit::value(url);
+                changed = true;
+                summary.push(format!("model_catalog_url → {url}"));
+            }
+        }
+        None => {
+            if t.remove("model_catalog_url").is_some() {
+                changed = true;
+                summary.push("移除 model_catalog_url（恢复 Codex 默认目录）".to_string());
+            }
+        }
+    }
 
     if changed {
         summary.push(format!("写入 model_providers.{ROUTE_ID}（bearer token 内联）"));

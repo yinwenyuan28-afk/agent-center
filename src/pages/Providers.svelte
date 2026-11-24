@@ -41,6 +41,8 @@
     claudeOnboardingStatus,
     setClaudeOnboardingSkip,
     setCodexRequiresOpenaiAuth,
+    setCodexConnection,
+    codexConnectionStatus,
   } from '../lib/ipc';
   import type {
     ClaudeModelMap,
@@ -275,6 +277,21 @@
    */
   let codexAuthDialog = $state<null | { providerId: string; value: boolean | null }>(null);
 
+  /**
+   * Codex 连接设置弹窗。
+   *
+   * 管两个键：`supports_websockets`（关闭无效重连）和 `model_catalog_url`
+   * （自定义端点拉不到官方模型目录时补一个地址）。和「后端开关」一样，
+   * 只改当前分配给 Codex 的那条 provider，改完立刻重写 config.toml。
+   */
+  let codexConnDialog = $state<null | {
+    providerId: string;
+    /** null = 不写 supports_websockets */
+    websockets: boolean | null;
+    /** 空串 = 不写 model_catalog_url */
+    modelCatalogUrl: string;
+  }>(null);
+
   /** Cursor 卡片默认折叠：它的数据在 SQLite 里，和上面几个 agent 不是一套。 */
   let cursorOpen = $state(false);
 
@@ -430,6 +447,8 @@
           claudeModelMap: p.claudeModelMap ?? {},
           // 旧后端可能完全不返回这个字段；补成 null（= 自动）
           codexRequiresOpenaiAuth: p.codexRequiresOpenaiAuth ?? null,
+          codexSupportsWebsockets: p.codexSupportsWebsockets ?? null,
+          codexModelCatalogUrl: p.codexModelCatalogUrl ?? null,
         })),
       };
       providers = (await withTimeout(listProviders(), '读取 provider 列表')).map((p) => ({
@@ -439,6 +458,8 @@
         agents: p.agents ?? [],
         claudeModelMap: p.claudeModelMap ?? {},
         codexRequiresOpenaiAuth: p.codexRequiresOpenaiAuth ?? null,
+        codexSupportsWebsockets: p.codexSupportsWebsockets ?? null,
+        codexModelCatalogUrl: p.codexModelCatalogUrl ?? null,
       }));
     } catch (e) {
       log = `读取失败：${e instanceof Error ? e.message : String(e)}`;
@@ -493,7 +514,7 @@
     }
   }
 
-  /** 某个 agent 上已启用的 provider（按母版顺序）。 */
+  /** 某个 agent 上母版分配的 provider（按母版顺序）。不代表已写入配置文件。 */
   function providersForAgent(agent: string): ProviderView[] {
     return (matrix?.providers ?? []).filter((p) => p.agents.includes(agent));
   }
@@ -667,6 +688,74 @@
       log = r.output;
       if (!r.ok) throw new Error(r.output);
       codexAuthDialog = null;
+      await load();
+    } catch (e) {
+      log = `写入失败：${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      busy = false;
+    }
+  }
+
+  /**
+   * 打开 Codex 连接设置弹窗。
+   *
+   * 默认值以 `~/.codex/config.toml` 里的实际配置为准（用户可能手动改过），
+   * 读盘失败时才退回母版记录。未分配 provider 时也弹窗提示先勾一个。
+   */
+  async function openCodexConnDialog(providerId: string | null) {
+    const id = providerId ?? '';
+    const p = providers.find((x) => x.id === id);
+    codexConnDialog = {
+      providerId: id,
+      websockets: p?.codexSupportsWebsockets ?? null,
+      modelCatalogUrl: p?.codexModelCatalogUrl ?? '',
+    };
+    if (!id) return;
+
+    // 只有当前分配给 Codex 的那一条，config.toml 里才是它的值。
+    // 没分配时读盘会拿到别人（或空）的配置，不如直接用母版值。
+    if (!p?.agents.includes('codex')) return;
+
+    try {
+      const st = await codexConnectionStatus();
+      // 读盘期间弹窗可能已被关掉或切走，别把值写到错的地方
+      if (!codexConnDialog || codexConnDialog.providerId !== id) return;
+      // 盘上生效的必须是这个 provider，否则读到的是上一家的表
+      if (!sameBaseUrl(st.baseUrl, p.baseUrl)) return;
+      codexConnDialog = {
+        ...codexConnDialog,
+        websockets: st.supportsWebsockets,
+        modelCatalogUrl: st.modelCatalogUrl ?? '',
+      };
+    } catch {
+      // 读不到就保留母版值，不打断操作
+    }
+  }
+
+  /** 比较两个 base_url，忽略末尾斜杠差异。 */
+  function sameBaseUrl(a: string | null | undefined, b: string | null | undefined): boolean {
+    if (!a || !b) return false;
+    return a.trim().replace(/\/+$/, '') === b.trim().replace(/\/+$/, '');
+  }
+
+  /** 猜模型目录地址：多数端点是 `<baseUrl>/models`（去掉末尾斜杠）。 */
+  function suggestCatalogUrl(providerId: string): string {
+    const p = providers.find((x) => x.id === providerId);
+    if (!p) return '';
+    return `${p.baseUrl.replace(/\/+$/, '')}/models`;
+  }
+
+  /** 保存 Codex 连接设置。后端会立刻只重写 Codex 的配置。 */
+  async function confirmCodexConnection() {
+    const dlg = codexConnDialog;
+    if (!dlg || !dlg.providerId) return;
+    busy = true;
+    try {
+      const url = dlg.modelCatalogUrl.trim();
+      const r = await setCodexConnection(dlg.providerId, dlg.websockets, url === '' ? null : url);
+      log = r.output;
+      if (!r.ok) throw new Error(r.output);
+      codexConnDialog = null;
       await load();
     } catch (e) {
       log = `写入失败：${e instanceof Error ? e.message : String(e)}`;
@@ -857,6 +946,8 @@
         // 它们只在启用页的 Codex 卡片里改。
         codexRequiresOpenaiAuth: editing ? (editing.codexRequiresOpenaiAuth ?? null) : null,
         codexModel: editing ? (editing.codexModel ?? null) : null,
+        codexSupportsWebsockets: editing ? (editing.codexSupportsWebsockets ?? null) : null,
+        codexModelCatalogUrl: editing ? (editing.codexModelCatalogUrl ?? null) : null,
         note: form.note.trim(),
       });
       log = r.output;
@@ -930,6 +1021,7 @@
     else if (claudeMapDialog) closeClaudeMapDialog();
     else if (onboardingDialog) onboardingDialog = null;
     else if (codexAuthDialog) codexAuthDialog = null;
+    else if (codexConnDialog) codexConnDialog = null;
     else if (assigningId) assigningId = null;
   }}
 />
@@ -1450,7 +1542,7 @@
         class="scroll-mt-4 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)]"
         data-agent-card={col.agent}
       >
-        <!-- 卡片头：整块可点，展开/收起。右侧常显已启用的 provider -->
+        <!-- 卡片头：整块可点，展开/收起。右侧常显母版里分配的 provider（不代表已写入配置） -->
         <button
           type="button"
           class="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-[var(--color-bg-hover)]"
@@ -1479,9 +1571,9 @@
               {#if !col.available}
                 {col.note || '配置目录不存在，无法注入'}
               {:else if chosen.length === 0}
-                还没有启用任何 provider
+                还没有分配任何 provider
               {:else}
-                {single ? '当前生效' : `已启用 ${chosen.length} 个`}：{chosen.map((p) => p.id).join(', ')}
+                {single ? '母版指定' : `母版分配 ${chosen.length} 个`}：{chosen.map((p) => p.id).join(', ')}
               {/if}
             </div>
           </div>
@@ -1580,6 +1672,14 @@
                   onclick={() => openCodexAuthDialog(chosen[0]?.id ?? null)}
                 >
                   后端开关
+                </button>
+                <button
+                  type="button"
+                  class="rounded-[var(--radius-sm)] border border-[var(--color-border-strong)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                  title="supports_websockets / model_catalog_url：关闭无效重连、补模型目录"
+                  onclick={() => openCodexConnDialog(chosen[0]?.id ?? null)}
+                >
+                  连接设置
                 </button>
               {/if}
 
@@ -1870,6 +1970,125 @@
       <div class="mt-4 flex justify-end gap-2">
         <Button variant="ghost" onclick={() => (codexAuthDialog = null)} disabled={busy}>取消</Button>
         <Button variant="primary" onclick={confirmCodexAuth} disabled={busy || !codexAuthDialog.providerId}>
+          {busy ? '写入中…' : '保存'}
+        </Button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if codexConnDialog}
+  {@const dlg = codexConnDialog}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+    role="dialog"
+    tabindex="-1"
+    aria-modal="true"
+    aria-labelledby="codex-conn-title"
+    onclick={(e) => {
+      if (e.target === e.currentTarget && !busy) codexConnDialog = null;
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape' && !busy) codexConnDialog = null;
+    }}
+  >
+    <div
+      class="w-full max-w-lg rounded-[var(--radius-lg)] border border-[var(--color-border-strong)] bg-[var(--color-bg)] p-4 shadow-lg"
+    >
+      <h2 id="codex-conn-title" class="text-[14px] font-medium text-[var(--color-text)]">
+        Codex 连接设置
+      </h2>
+      <p class="mt-1 text-[12px] leading-relaxed text-[var(--color-text-muted)]">
+        {#if dlg.providerId}
+          当前 provider：<code class="text-[11px]">{dlg.providerId}</code>。
+          改完立刻只重写 <code class="text-[11px]">~/.codex/config.toml</code>。
+        {:else}
+          还没有给 Codex 分配 provider，没有可以写这条设置的地方。先在下面的列表里勾选一个
+          provider，再点「连接设置」。
+        {/if}
+      </p>
+
+      <div class="mt-3 flex flex-col gap-3">
+        <label class="block">
+          <span class="field-label">WebSocket</span>
+          <select
+            class="field-control w-full"
+            value={dlg.websockets === null ? '' : String(dlg.websockets)}
+            onchange={(e) => {
+              if (!codexConnDialog) return;
+              const v = (e.currentTarget as HTMLSelectElement).value;
+              codexConnDialog = {
+                ...codexConnDialog,
+                websockets: v === '' ? null : v === 'true',
+              };
+            }}
+          >
+            <option value="">不设置（Codex 默认）</option>
+            <option value="false">禁用（supports_websockets = false）</option>
+            <option value="true">启用（supports_websockets = true）</option>
+          </select>
+          <span class="mt-1 block text-[11px] leading-relaxed text-[var(--color-text-faint)]">
+            端点不支持 WebSocket 时 Codex 会反复重连，回复迟迟不出。选「禁用」只走 HTTP。
+          </span>
+        </label>
+
+        <label class="block">
+          <span class="field-label">模型目录地址 model_catalog_url</span>
+          <input
+            class="field-control w-full font-[var(--font-mono)]"
+            value={dlg.modelCatalogUrl}
+            placeholder="https://example.com/v1/models"
+            oninput={(e) => {
+              if (!codexConnDialog) return;
+              codexConnDialog = {
+                ...codexConnDialog,
+                modelCatalogUrl: (e.currentTarget as HTMLInputElement).value,
+              };
+            }}
+          />
+          <span class="mt-1 flex items-center gap-2 text-[11px] text-[var(--color-text-faint)]">
+            <span class="min-w-0 flex-1 leading-relaxed">
+              自定义端点拉不到官方模型目录时，模型列表会是空的。填一个返回 OpenAI 模型列表
+              JSON 的地址；留空表示不写这个键。
+            </span>
+            <button
+              type="button"
+              class="shrink-0 text-[11px] underline-offset-2 hover:text-[var(--color-accent)] hover:underline"
+              onclick={() => {
+                if (!codexConnDialog) return;
+                codexConnDialog = {
+                  ...codexConnDialog,
+                  modelCatalogUrl: suggestCatalogUrl(codexConnDialog.providerId),
+                };
+              }}
+            >
+              填入 base_url/models
+            </button>
+          </span>
+        </label>
+
+        <div
+          class="rounded-[var(--radius-md)] bg-[var(--color-bg-subtle)] px-3 py-2 font-[var(--font-mono)] text-[11px] leading-relaxed text-[var(--color-text-muted)]"
+        >
+          <div>[model_providers.custom]</div>
+          <div>
+            supports_websockets = {dlg.websockets === null ? '（不写）' : String(dlg.websockets)}
+          </div>
+          <div>
+            model_catalog_url = {dlg.modelCatalogUrl.trim() === ''
+              ? '（不写）'
+              : `"${dlg.modelCatalogUrl.trim()}"`}
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" onclick={() => (codexConnDialog = null)} disabled={busy}>取消</Button>
+        <Button
+          variant="primary"
+          onclick={confirmCodexConnection}
+          disabled={busy || !dlg.providerId}
+        >
           {busy ? '写入中…' : '保存'}
         </Button>
       </div>

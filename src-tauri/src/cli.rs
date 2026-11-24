@@ -488,6 +488,14 @@ pub enum ProvidersCmd {
         /// 不填就沿用 models 的第一个。
         #[arg(long = "codex-model", value_name = "MODEL")]
         codex_model: Option<String>,
+        /// 写 `supports_websockets`。传 `false` 关闭 WebSocket，
+        /// 避免端点不支持时反复无效重连
+        #[arg(long = "codex-websockets", value_name = "BOOL")]
+        codex_websockets: Option<bool>,
+        /// 写 `model_catalog_url`，一般是 `<base_url>/models`。
+        /// 传空串表示清掉这个键
+        #[arg(long = "codex-model-catalog-url", value_name = "URL")]
+        codex_model_catalog_url: Option<String>,
     },
 
     /// 从母版里删除一条 provider

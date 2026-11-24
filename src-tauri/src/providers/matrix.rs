@@ -47,6 +47,8 @@ fn to_view(p: &Provider) -> ProviderView {
         claude_model_map: p.claude_model_map.clone(),
         codex_requires_openai_auth: p.codex_requires_openai_auth,
         codex_model: p.codex_model.clone(),
+        codex_supports_websockets: p.codex_supports_websockets,
+        codex_model_catalog_url: p.codex_model_catalog_url.clone(),
         note: p.note.clone(),
         api_key: p.api_key.clone(),
         key_len: p.api_key.len(),

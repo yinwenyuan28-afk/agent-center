@@ -70,6 +70,8 @@ kind = "openai-responses"
 api_key = "${commandKey}"
 models = ["deepseek/deepseek-v4.1-flash"]
 agents = ["claude", "codex"]
+codex_supports_websockets = false
+codex_model_catalog_url = "https://api.commandcode.ai/provider/v1/models"
 
 [[provider]]
 id = "codex-alt"
@@ -169,6 +171,13 @@ check(
 
 // 8. 第二个 provider 不该有自己的表
 check('没有为 codex-alt 建表', !codexAfter.includes('[model_providers.codex-alt]'));
+
+// 9. 连接参数：关 WebSocket、补模型目录
+check('supports_websockets = false', /^supports_websockets = false$/m.test(codexAfter));
+check(
+  'model_catalog_url 写入',
+  /^model_catalog_url = "https:\/\/api\.commandcode\.ai\/provider\/v1\/models"$/m.test(codexAfter),
+);
 
 // ---------------------------------------------------------------- 幂等
 console.log('\n第二次同步（幂等验证）…');

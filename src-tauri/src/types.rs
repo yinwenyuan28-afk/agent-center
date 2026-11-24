@@ -92,12 +92,15 @@ pub struct Skill {
     pub file_count: usize,
     /// 目录字节数
     pub size_bytes: u64,
-    /// 归属的 agent 列表。空数组 = 公共 skill，所有 agent 都能读
-    pub agents: Vec<String>,
+/// 归属的 agent 列表。空数组 = 公共 skill，放在中心库。
+/// 直接读中心库目录的 agent 可见；其余 agent 需要在各自目录建链接才能读到
+pub agents: Vec<String>,
     /// 专用 skill 的本体目录。公共 skill 为空
     pub store_path: Option<String>,
-    /// 专用 skill 在各 agent 目录里链接的健康状态。公共 skill 恒为 `ok`
-    pub link_state: PrivateLinkState,
+/// 专用 skill 在各 agent 目录里链接的健康状态。
+/// 公共 skill 没有按 agent 的链接可查，这里恒为 `ok` —— 它只表示
+/// 「中心库里有这个目录」，不代表每个 agent 都真的能读到
+pub link_state: PrivateLinkState,
 }
 
 /// 专用 skill 的链接健康状态。
@@ -371,6 +374,8 @@ pub struct GitChange {
 pub struct GitStatus {
     pub is_repo: bool,
     pub branch: String,
+    /// 当前分支是否配置了上游。false 时 ahead/behind 没有意义
+    pub has_upstream: bool,
     pub ahead: usize,
     pub behind: usize,
     pub changed: Vec<GitChange>,
@@ -687,6 +692,15 @@ pub struct ProviderView {
     /// Codex 的模型选择器只列官方目录，自定义 provider 的模型进不去，
     /// 所以只能靠这个字段决定用哪个。`None` 表示回退到 `models` 的第一个。
     pub codex_model: Option<String>,
+    /// Codex 是否启用 WebSocket（写入注入器管的那张 provider 表）。
+    ///
+    /// `None` 表示不写这个键；`Some(false)` 关闭 WebSocket，避免端点不支持
+    /// 时反复无效重连。
+    pub codex_supports_websockets: Option<bool>,
+    /// Codex 拉模型目录的地址（写入注入器管的那张 provider 表）。
+    ///
+    /// 自定义端点拉不到官方目录时补上，一般是 `<base_url>/models`。
+    pub codex_model_catalog_url: Option<String>,
     pub note: String,
     /// key 明文原文。界面编辑框直接显示它
     pub api_key: String,
@@ -694,6 +708,30 @@ pub struct ProviderView {
     pub key_len: usize,
     /// key 末尾 4 位，帮助辨认
     pub key_tail: String,
+}
+
+/// Codex 连接参数的实际状态，读自 `~/.codex/config.toml`。
+///
+/// 界面用它预填「连接设置」：母版里可能还没写过这两个键，但用户可能
+/// 直接改过配置文件，所以显示值要以盘上为准。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexConnectionStatus {
+    /// 配置文件是否存在
+    pub available: bool,
+    /// 实际读写的文件路径，界面展示用
+    pub path: String,
+    /// 当前生效的 provider 表名（顶层 `model_provider`）。
+    /// `None` 表示表不存在，界面禁用写入
+    pub provider_id: Option<String>,
+    /// 表里的 base_url，用来猜模型目录地址
+    pub base_url: Option<String>,
+    /// 当前 `supports_websockets`；`None` 表示文件里没写这个键
+    pub supports_websockets: Option<bool>,
+    /// 当前 `model_catalog_url`；`None` 表示文件里没写这个键
+    pub model_catalog_url: Option<String>,
+    /// 当前 `requires_openai_auth`；`None` 表示没写（Codex 自动判断）
+    pub requires_openai_auth: Option<bool>,
 }
 
 /// Claude Code 首次启动引导（onboarding）开关的状态。

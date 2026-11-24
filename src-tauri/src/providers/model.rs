@@ -278,6 +278,37 @@ pub struct Provider {
         skip_serializing_if = "Option::is_none"
     )]
     pub codex_model: Option<String>,
+    /// 分配给 Codex 时写进 `[model_providers.custom].supports_websockets`。
+    ///
+    /// Codex 抓到流式响应后会尝试把连接升级成 WebSocket；端点不支持时
+    /// 会反复重连（日志里一串无效重连），表现为回复迟迟出不来。写
+    /// `false` 让 Codex 只用 HTTP 上传下载，避免这套重连。
+    ///
+    /// - `Some(false)`：写 `supports_websockets = false`
+    /// - `Some(true)`：写 `supports_websockets = true`
+    /// - `None`：不写这个键（并从我们管的表里清掉），回到 Codex 默认行为
+    ///
+    /// 注意这里的 `None` 和 `codex_requires_openai_auth` 的自动判断不同：
+    /// 「不写」本身就是完整语义，没有「看盘上状态推断」这回事。
+    #[serde(
+        default,
+        rename = "codex_supports_websockets",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_supports_websockets: Option<bool>,
+    /// 分配给 Codex 时写进 `[model_providers.custom].model_catalog_url`。
+    ///
+    /// Codex 默认只从官方地址拉模型目录；配了自定义端点后目录可能拉不到，
+    /// 模型列表就变成空的。补一个能返回 OpenAI 模型列表 JSON 的地址
+    /// （通常是 `<base_url>/models`）后，Codex 就能正常列出模型。
+    ///
+    /// `None` / 空白串表示不写这个键。
+    #[serde(
+        default,
+        rename = "codex_model_catalog_url",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_model_catalog_url: Option<String>,
     /// 备注，自由文本。用于记录 key 是哪天从哪拿的
     #[serde(default)]
     pub note: String,
